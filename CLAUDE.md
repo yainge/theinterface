@@ -126,7 +126,8 @@ sensor.setRedLedAmplitude(value) // set the Red LED current (register 0x0C)
 sensor.readFIFO(red, ir)  // burst-read 6 bytes → two 18-bit values
 sensor.getIR()         // returns one IR sample, or -1 on error
 sensor.getFIFOCount()  // (WR_PTR - RD_PTR) & 0x1F
-sensor.getOverflowCount() // OVF_COUNTER (register 0x05) — samples lost since last read
+sensor.getOverflowCount() // OVF_COUNTER (register 0x05) — debug/inspection only; appears
+                           // read-only on this hardware, not usable to reset a latched value
 sensor.dumpConfig()    // print key registers to Serial (debug)
 sensor.readRegister(reg) / writeRegister(reg, val)
 ```
@@ -156,7 +157,6 @@ Each strip is independent; strip 1 = participant 1's heartrate, strip 2 = partic
    - Tracking uses a DC-removed IR waveform, adaptive per-person threshold, plausible beat intervals, and a rolling eight-interval BPM average.
    - HRV is RMSSD over the same eight-interval buffer, in ms.
    - SpO2 is a ratio-of-ratios estimate from Red/IR AC-DC levels using an uncalibrated empirical formula — a biofeedback cue, not a medical reading.
-   - A nonzero `OVF_COUNTER` forces a channel back to `NO_CONTACT` so lost FIFO samples never silently desync the timing these metrics depend on.
    - Validate the displayed BPM against a manually counted pulse before treating it as ready for the installation.
 
 2. **Motor modulation** — implemented. Each detected beat triggers a non-blocking linear
@@ -182,6 +182,13 @@ Each strip is independent; strip 1 = participant 1's heartrate, strip 2 = partic
   `theinterface.ino` must track this (40 ms), not the raw 100 Hz sample rate — using
   10 ms understated real beat intervals ~4x and made valid beats fail the
   `MIN_BEAT_INTERVAL_MS` plausibility check.
+- `OVF_COUNTER` (register 0x05) appears to be read-only on this hardware — writing 0 back
+  to it did not clear a latched nonzero value. An earlier attempt to use it for automatic
+  overflow-triggered recalibration was removed because it permanently stuck every channel
+  in `CALIBRATING` (the flag never cleared, so it re-triggered `enterNoContact()` every
+  loop). `getOverflowCount()` is kept for manual/debug inspection only — do not wire it
+  back into automatic control flow without confirming the real clear mechanism against the
+  datasheet first.
 
 ---
 

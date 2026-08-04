@@ -396,15 +396,6 @@ bool startSensor(HeartChannel &channel, const __FlashStringHelper *name)
 
 void readChannel(HeartChannel &channel)
 {
-    // A nonzero overflow count means the FIFO filled and old samples were
-    // silently dropped (rollover is enabled in FIFO_CFG) since our last
-    // read. sampleTime bookkeeping assumes exactly one 40 ms period per FIFO
-    // entry, so lost samples would desync BPM/HRV/SpO2 timing without this
-    // check. Treat it like a contact loss so calibration re-locks from a
-    // clean state instead of silently trusting corrupted timing.
-    if (channel.sensor.getOverflowCount() > 0)
-        channel.enterNoContact();
-
     byte count = channel.sensor.getFIFOCount();
     for (byte i = 0; i < count; ++i)
     {

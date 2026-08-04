@@ -143,16 +143,11 @@ bool InterfaceSensor::setRedLedAmplitude(byte amplitude)
 
 byte InterfaceSensor::getOverflowCount()
 {
-    byte count = readRegister(0x05);
-
-    // Explicitly clear rather than relying on the chip to auto-reset this on
-    // its own -- if it doesn't, a single overflow event latches this
-    // register nonzero forever and the caller's overflow handling never
-    // stops firing.
-    if (count > 0)
-        writeRegister(0x05, 0x00);
-
-    return count;
+    // Debug/inspection only -- not used to drive any automatic behaviour.
+    // OVF_COUNTER appears to be read-only on this hardware: writing 0 back
+    // to it did not clear a latched nonzero value (confirmed by testing),
+    // so treat it as informational rather than something that can be reset.
+    return readRegister(0x05);
 }
 
 bool InterfaceSensor::readFIFO(uint32_t &red, uint32_t &ir)

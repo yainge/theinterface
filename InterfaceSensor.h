@@ -21,7 +21,8 @@ public:
     bool reset();
 
     bool setupSensor();
-    
+    bool setIRLedAmplitude(byte amplitude);
+
 
     bool readFIFO(uint32_t &red, uint32_t &ir);
     long getIR();

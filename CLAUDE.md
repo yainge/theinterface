@@ -111,7 +111,7 @@ arduino-cli compile --fqbn arduino:avr:uno --library . HardwareTest
 | File | Purpose |
 |---|---|
 | `InterfaceSensor.h` / `.cpp` | MAX30102 sensor library — complete and working |
-| `theinterface.ino` | Main sketch — currently just a single-sensor IR readout loop |
+| `theinterface.ino` | Main sketch — two-participant serial visualizer with runtime calibration and BPM tracking |
 | `HardwareTest/HardwareTest.ino` | Serial menu-driven hardware test for all components |
 | `DESIGN.md` | Human-readable design doc (goals, LED behaviour, task order) |
 
@@ -124,6 +124,7 @@ InterfaceSensor sensor(sdaPin, sclPin);
 
 sensor.begin()         // init SoftWire, verify part ID (0x15) — returns bool
 sensor.setupSensor()   // reset chip, configure SpO2 mode 100 Hz 411µs 4× avg — returns bool
+sensor.setIRLedAmplitude(value) // set the IR LED current (register 0x0D)
 sensor.readFIFO(red, ir)  // burst-read 6 bytes → two 18-bit values
 sensor.getIR()         // returns one IR sample, or -1 on error
 sensor.getFIFOCount()  // (WR_PTR - RD_PTR) & 0x1F
@@ -151,10 +152,10 @@ Each strip is independent; strip 1 = participant 1's heartrate, strip 2 = partic
 
 ## Task order (dependencies)
 
-1. **Clean raw IR → BPM** — everything else depends on a reliable BPM number.
-   - MAX30102 gives raw 18-bit IR samples at 100 Hz.
-   - Need a peak detector to find pulse peaks → compute inter-beat intervals → BPM.
-   - An existing example program does this translation; use it as a starting point.
+1. **Validate raw IR → BPM** — the main sketch now has a per-person `no contact → calibrating → tracking` pipeline.
+   - Calibration automatically adjusts only that sensor's IR LED current and then locks it before BPM tracking.
+   - Tracking uses a DC-removed waveform, adaptive per-person threshold, plausible beat intervals, and a rolling four-interval BPM average.
+   - Validate the displayed BPM against a manually counted pulse before treating it as ready for the installation.
 
 2. **Motor modulation** — smooth onset, feels like a heartbeat, tuned via potentiometer.
 
@@ -169,6 +170,7 @@ Each strip is independent; strip 1 = participant 1's heartrate, strip 2 = partic
   differentials). Hardcoded SoftWire on D8/D9 is stable.
 - Hardware I2C Wire API caused failures; SoftWire fixed it.
 - `getIR()` does not guard against an empty FIFO — always call `getFIFOCount()` first.
+- The visualizer's automatic calibration targets roughly 90,000–225,000 IR counts. It recalibrates when contact is lost; no reflash is needed for a new participant.
 
 ---
 

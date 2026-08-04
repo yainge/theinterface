@@ -22,6 +22,16 @@ Shared inputs:
 
 ## What the system does
 
+### Current heart-rate visualizer
+
+The main sketch provides a two-participant development visualizer over USB serial. Each participant is handled independently:
+
+1. **No contact** — the channel reports no BPM.
+2. **Calibrating** — the software adjusts that sensor's IR LED current until its signal is in a useful range, then waits for it to settle.
+3. **Tracking** — gain is locked, the DC component is removed, and adaptive peak detection produces a rolling BPM estimate.
+
+This lets people with different skin, finger placement, and signal strengths use either sensor without reflashing. Open Arduino IDE's Serial Plotter at 115200 baud to view `Wave1`, `Wave2`, `Beat1`, `Beat2`, `BPM1`, `BPM2`, `State1`, and `State2`. State values are 0 = no contact, 1 = calibrating, and 2 = tracking.
+
 ### LED behaviour
 
 The two LED strips run independently and reflect each participant's heartrate in real time.
@@ -44,10 +54,10 @@ but a felt pulse. Intensity is tunable via the potentiometer.
 
 Everything depends on a reliable BPM number. Do these in order:
 
-1. **Get clean BPM from raw sensor data**
-   The MAX30102 outputs raw 18-bit infrared samples at 100 Hz. A peak-detection algorithm
-   finds the peaks and computes inter-beat intervals → BPM. There is an existing example
-   program that does this translation; use it as the starting point.
+1. **Validate clean BPM from raw sensor data**
+   The main sketch now performs per-person automatic gain calibration followed by adaptive
+   peak detection. Compare its BPM output against a manually counted pulse and tune only if
+   needed; do not use it for medical measurement.
 
 2. **Build motor modulation**
    Smooth onset, natural decay, tuned to feel like a heartbeat rather than a buzz.
@@ -90,6 +100,6 @@ Everything depends on a reliable BPM number. Do these in order:
 | File | What it is |
 |---|---|
 | `InterfaceSensor.h/.cpp` | Heart sensor library — done |
-| `theinterface.ino` | Main sketch — currently a single-sensor IR loop; needs full implementation |
+| `theinterface.ino` | Main sketch — two-person HR visualizer with runtime calibration and BPM tracking |
 | `HardwareTest/HardwareTest.ino` | Test harness — flash this to verify each component works before writing production code |
 | `CLAUDE.md` | Technical reference for AI-assisted development |

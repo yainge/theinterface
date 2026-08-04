@@ -131,6 +131,11 @@ bool InterfaceSensor::setupSensor()
     return true;
 }
 
+bool InterfaceSensor::setIRLedAmplitude(byte amplitude)
+{
+    return writeRegister(0x0D, amplitude);
+}
+
 bool InterfaceSensor::readFIFO(uint32_t &red, uint32_t &ir)
 {
     byte data[6];

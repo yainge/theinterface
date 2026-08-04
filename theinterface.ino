@@ -1,4 +1,5 @@
 #include "InterfaceSensor.h"
+#include <math.h>
 
 // Open Tools > Serial Plotter at 115200 baud. The sketch emits one labelled
 // line every 40 ms for the two independent participant channels.
@@ -8,16 +9,33 @@ const uint8_t SENSOR2_SDA = A4;
 const uint8_t SENSOR2_SCL = A5;
 
 const long CONTACT_DETECTED_IR = 6000;
-const long GAIN_TARGET_LOW_IR = 90000;
-const long GAIN_TARGET_HIGH_IR = 225000;
-const byte INITIAL_IR_LED_CURRENT = 0x30;
-const byte MIN_IR_LED_CURRENT = 0x08;
-const byte MAX_IR_LED_CURRENT = 0x3F;
-const uint16_t SAMPLE_PERIOD_MS = 10; // MAX30102 is configured for 100 Hz.
+const long GAIN_TARGET_LOW = 90000;
+const long GAIN_TARGET_HIGH = 225000;
+const byte INITIAL_LED_CURRENT = 0x30;
+const byte MIN_LED_CURRENT = 0x08;
+const byte MAX_LED_CURRENT = 0x3F;
+const uint16_t SAMPLE_PERIOD_MS = 40; // MAX30102 samples at 100 Hz, but FIFO_CFG
+                                       // averages 4 samples per FIFO push (see
+                                       // InterfaceSensor::setupSensor), so a new
+                                       // FIFO entry only arrives every 40 ms.
 const uint16_t GAIN_ADJUST_INTERVAL_MS = 350;
 const uint16_t GAIN_SETTLE_MS = 2500;
 const uint16_t MIN_BEAT_INTERVAL_MS = 300;
 const uint16_t MAX_BEAT_INTERVAL_MS = 2000;
+
+const byte INTERVAL_BUFFER_SIZE = 8; // beat intervals kept for BPM averaging and HRV (RMSSD)
+
+const long SPO2_MIN_AC = 20;             // ignore ratio-of-ratios input this close to the noise floor
+const float SPO2_MIN_PLAUSIBLE = 70.0;   // reject outlier estimates outside a plausible
+const float SPO2_MAX_PLAUSIBLE = 100.0;  // range rather than smoothing them in
+const float SPO2_SMOOTHING = 0.1;        // low-pass filter weight applied to each new estimate
+
+// Simplified empirical SpO2 = a - b*R approximation (R = ratio-of-ratios of the
+// Red vs. IR AC/DC levels). Widely used in hobbyist MAX30102 projects; NOT
+// clinically calibrated. Good enough as a ratiometric biofeedback cue, not a
+// real pulse-oximeter reading -- see DESIGN.md.
+const double SPO2_RATIO_INTERCEPT = 110.0;
+const double SPO2_RATIO_SLOPE = 25.0;
 
 enum ChannelState : byte
 {
@@ -30,26 +48,39 @@ struct HeartChannel
 {
     InterfaceSensor sensor;
     ChannelState state;
+
     byte irLedCurrent;
     long dcEstimate;
     long wave;
     long positivePeak;
+
+    byte redLedCurrent;
+    long redDcEstimate;
+    long redWave;
+    long redPositivePeak;
+
     long threshold;
     unsigned long sampleTime;
     unsigned long lastBeatTime;
     unsigned long beatFlashUntil;
     unsigned long lastGainAdjust;
     unsigned long gainStableSince;
+
     uint16_t bpm;
-    uint16_t intervals[4];
+    uint16_t hrv;
+    float spo2;
+
+    uint16_t intervals[INTERVAL_BUFFER_SIZE];
     byte intervalCount;
     byte intervalIndex;
 
     HeartChannel(uint8_t sda, uint8_t scl)
         : sensor(sda, scl), state(NO_CONTACT),
-          irLedCurrent(INITIAL_IR_LED_CURRENT), dcEstimate(0), wave(0),
-          positivePeak(0), threshold(120), sampleTime(0), lastBeatTime(0),
-          beatFlashUntil(0), lastGainAdjust(0), gainStableSince(0), bpm(0),
+          irLedCurrent(INITIAL_LED_CURRENT), dcEstimate(0), wave(0), positivePeak(0),
+          redLedCurrent(INITIAL_LED_CURRENT), redDcEstimate(0), redWave(0), redPositivePeak(0),
+          threshold(120), sampleTime(0), lastBeatTime(0),
+          beatFlashUntil(0), lastGainAdjust(0), gainStableSince(0),
+          bpm(0), hrv(0), spo2(0),
           intervalCount(0), intervalIndex(0)
     {
     }
@@ -60,26 +91,36 @@ struct HeartChannel
         dcEstimate = 0;
         wave = 0;
         positivePeak = 0;
+        redDcEstimate = 0;
+        redWave = 0;
+        redPositivePeak = 0;
         threshold = 120;
         sampleTime = 0;
         lastBeatTime = 0;
         beatFlashUntil = 0;
         bpm = 0;
+        hrv = 0;
+        spo2 = 0;
         intervalCount = 0;
         intervalIndex = 0;
     }
 
-    void enterCalibration(long ir)
+    void enterCalibration(long red, long ir)
     {
         state = CALIBRATING;
         dcEstimate = ir << 4;
         wave = 0;
         positivePeak = 0;
+        redDcEstimate = red << 4;
+        redWave = 0;
+        redPositivePeak = 0;
         threshold = 120;
         sampleTime = millis();
         lastBeatTime = 0;
         beatFlashUntil = 0;
         bpm = 0;
+        hrv = 0;
+        spo2 = 0;
         intervalCount = 0;
         intervalIndex = 0;
         lastGainAdjust = 0;
@@ -91,11 +132,33 @@ struct HeartChannel
         state = TRACKING;
         wave = 0;
         positivePeak = 0;
+        redWave = 0;
+        redPositivePeak = 0;
         threshold = 120;
         lastBeatTime = 0;
         intervalCount = 0;
         intervalIndex = 0;
         bpm = 0;
+        hrv = 0;
+        spo2 = 0;
+    }
+
+    static byte stepLedCurrent(byte current, long dcLevel)
+    {
+        byte next = current;
+        if (dcLevel < GAIN_TARGET_LOW && current < MAX_LED_CURRENT)
+        {
+            next = current + 2;
+            if (next > MAX_LED_CURRENT)
+                next = MAX_LED_CURRENT;
+        }
+        else if (dcLevel > GAIN_TARGET_HIGH && current > MIN_LED_CURRENT)
+        {
+            next = current - 2;
+            if (next < MIN_LED_CURRENT)
+                next = MIN_LED_CURRENT;
+        }
+        return next;
     }
 
     void adjustGain()
@@ -104,46 +167,89 @@ struct HeartChannel
             return;
         lastGainAdjust = millis();
 
-        long dcLevel = dcEstimate >> 4;
-        byte nextCurrent = irLedCurrent;
-        if (dcLevel < GAIN_TARGET_LOW_IR && irLedCurrent < MAX_IR_LED_CURRENT)
+        bool changed = false;
+
+        byte nextIr = stepLedCurrent(irLedCurrent, dcEstimate >> 4);
+        if (nextIr != irLedCurrent && sensor.setIRLedAmplitude(nextIr))
         {
-            nextCurrent = irLedCurrent + 2;
-            if (nextCurrent > MAX_IR_LED_CURRENT)
-                nextCurrent = MAX_IR_LED_CURRENT;
-        }
-        else if (dcLevel > GAIN_TARGET_HIGH_IR && irLedCurrent > MIN_IR_LED_CURRENT)
-        {
-            nextCurrent = irLedCurrent - 2;
-            if (nextCurrent < MIN_IR_LED_CURRENT)
-                nextCurrent = MIN_IR_LED_CURRENT;
+            irLedCurrent = nextIr;
+            changed = true;
         }
 
-        if (nextCurrent == irLedCurrent)
-            return;
-
-        if (sensor.setIRLedAmplitude(nextCurrent))
+        byte nextRed = stepLedCurrent(redLedCurrent, redDcEstimate >> 4);
+        if (nextRed != redLedCurrent && sensor.setRedLedAmplitude(nextRed))
         {
-            irLedCurrent = nextCurrent;
+            redLedCurrent = nextRed;
+            changed = true;
+        }
+
+        if (changed)
             gainStableSince = millis();
+    }
+
+    // RMSSD (root mean square of successive differences) over the beat
+    // intervals currently held in the ring buffer, walked in chronological
+    // order. A standard short-window, real-time-friendly HRV measure.
+    uint16_t computeRMSSD() const
+    {
+        if (intervalCount < 2)
+            return 0;
+
+        byte oldestIndex = (intervalCount < INTERVAL_BUFFER_SIZE) ? 0 : intervalIndex;
+        long previous = intervals[oldestIndex];
+        unsigned long sumSquaredDiff = 0;
+
+        for (byte i = 1; i < intervalCount; ++i)
+        {
+            byte idx = (oldestIndex + i) % INTERVAL_BUFFER_SIZE;
+            long diff = (long)intervals[idx] - previous;
+            sumSquaredDiff += (unsigned long)(diff * diff);
+            previous = intervals[idx];
         }
+
+        return (uint16_t)sqrt((double)sumSquaredDiff / (intervalCount - 1));
     }
 
     void recordBeat(unsigned long interval)
     {
         intervals[intervalIndex] = interval;
-        intervalIndex = (intervalIndex + 1) % 4;
-        if (intervalCount < 4)
+        intervalIndex = (intervalIndex + 1) % INTERVAL_BUFFER_SIZE;
+        if (intervalCount < INTERVAL_BUFFER_SIZE)
             ++intervalCount;
 
         unsigned long sum = 0;
         for (byte i = 0; i < intervalCount; ++i)
             sum += intervals[i];
         bpm = 60000UL / (sum / intervalCount);
+
+        hrv = computeRMSSD();
         beatFlashUntil = millis() + 120;
     }
 
-    void process(long ir)
+    // Ratio-of-ratios SpO2 estimate, evaluated once per full waveform cycle
+    // from the AC amplitude (positivePeak) and DC level of both LED
+    // channels. Runs independently of the BPM beat-plausibility check, since
+    // SpO2 doesn't need the same interval bounds.
+    void updateSpO2()
+    {
+        long irDc = dcEstimate >> 4;
+        long redDc = redDcEstimate >> 4;
+
+        if (positivePeak < SPO2_MIN_AC || redPositivePeak < SPO2_MIN_AC || irDc <= 0 || redDc <= 0)
+            return;
+
+        double irRatio = (double)positivePeak / (double)irDc;
+        double redRatio = (double)redPositivePeak / (double)redDc;
+        double r = redRatio / irRatio;
+        double estimate = SPO2_RATIO_INTERCEPT - SPO2_RATIO_SLOPE * r;
+
+        if (estimate < SPO2_MIN_PLAUSIBLE || estimate > SPO2_MAX_PLAUSIBLE)
+            return; // discard rather than smoothing in an implausible outlier
+
+        spo2 = (spo2 <= 0) ? estimate : (spo2 * (1.0 - SPO2_SMOOTHING) + estimate * SPO2_SMOOTHING);
+    }
+
+    void process(long red, long ir)
     {
         if (ir < CONTACT_DETECTED_IR)
         {
@@ -153,15 +259,17 @@ struct HeartChannel
         }
 
         if (state == NO_CONTACT)
-            enterCalibration(ir);
+            enterCalibration(red, ir);
 
         sampleTime += SAMPLE_PERIOD_MS;
 
         if (state == CALIBRATING)
         {
             // A relatively fast baseline is useful here because the LED gain
-            // changes during calibration. BPM is intentionally disabled.
+            // changes during calibration. BPM/HRV/SpO2 are intentionally
+            // disabled until gain is locked.
             dcEstimate += ((ir << 4) - dcEstimate) >> 4;
+            redDcEstimate += ((red << 4) - redDcEstimate) >> 4;
             adjustGain();
 
             if (millis() - gainStableSince >= GAIN_SETTLE_MS)
@@ -175,8 +283,13 @@ struct HeartChannel
         dcEstimate += ((ir << 4) - dcEstimate) >> 6;
         wave = ir - (dcEstimate >> 4);
 
+        redDcEstimate += ((red << 4) - redDcEstimate) >> 6;
+        redWave = red - (redDcEstimate >> 4);
+
         if (wave > positivePeak)
             positivePeak = wave;
+        if (redWave > redPositivePeak)
+            redPositivePeak = redWave;
 
         // Evaluate one pulse candidate at each downward zero crossing. The
         // adaptive threshold is per participant and follows pulse amplitude.
@@ -193,11 +306,14 @@ struct HeartChannel
                 lastBeatTime = sampleTime;
             }
 
+            updateSpO2();
+
             long nextThreshold = positivePeak / 2;
             if (nextThreshold < 80)
                 nextThreshold = 80;
             threshold = (threshold * 3 + nextThreshold) / 4;
             positivePeak = 0;
+            redPositivePeak = 0;
         }
     }
 
@@ -210,8 +326,6 @@ struct HeartChannel
 HeartChannel participant1(SENSOR1_SDA, SENSOR1_SCL);
 HeartChannel participant2(SENSOR2_SDA, SENSOR2_SCL);
 
-long latestIr1 = 0;
-long latestIr2 = 0;
 unsigned long lastPlotMs = 0;
 
 bool startSensor(HeartChannel &channel, const __FlashStringHelper *name)
@@ -231,7 +345,12 @@ bool startSensor(HeartChannel &channel, const __FlashStringHelper *name)
     }
     if (!channel.sensor.setIRLedAmplitude(channel.irLedCurrent))
     {
-        Serial.println(F("LED setup failed"));
+        Serial.println(F("IR LED setup failed"));
+        return false;
+    }
+    if (!channel.sensor.setRedLedAmplitude(channel.redLedCurrent))
+    {
+        Serial.println(F("Red LED setup failed"));
         return false;
     }
 
@@ -239,17 +358,23 @@ bool startSensor(HeartChannel &channel, const __FlashStringHelper *name)
     return true;
 }
 
-void readChannel(HeartChannel &channel, long &latestIr)
+void readChannel(HeartChannel &channel)
 {
+    // A nonzero overflow count means the FIFO filled and old samples were
+    // silently dropped (rollover is enabled in FIFO_CFG) since our last
+    // read. sampleTime bookkeeping assumes exactly one 40 ms period per FIFO
+    // entry, so lost samples would desync BPM/HRV/SpO2 timing without this
+    // check. Treat it like a contact loss so calibration re-locks from a
+    // clean state instead of silently trusting corrupted timing.
+    if (channel.sensor.getOverflowCount() > 0)
+        channel.enterNoContact();
+
     byte count = channel.sensor.getFIFOCount();
     for (byte i = 0; i < count; ++i)
     {
-        long ir = channel.sensor.getIR();
-        if (ir >= 0)
-        {
-            latestIr = ir;
-            channel.process(ir);
-        }
+        uint32_t red, ir;
+        if (channel.sensor.readFIFO(red, ir))
+            channel.process((long)red, (long)ir);
     }
 }
 
@@ -270,8 +395,8 @@ void setup()
 
 void loop()
 {
-    readChannel(participant1, latestIr1);
-    readChannel(participant2, latestIr2);
+    readChannel(participant1);
+    readChannel(participant2);
 
     if (millis() - lastPlotMs < 40)
         return;
@@ -281,9 +406,13 @@ void loop()
     Serial.print(F("Wave1:")); Serial.print(participant1.wave);
     Serial.print(F(" Beat1:")); Serial.print(millis() < participant1.beatFlashUntil ? 2500 : 0);
     Serial.print(F(" BPM1:")); Serial.print(participant1.bpm);
+    Serial.print(F(" HRV1:")); Serial.print(participant1.hrv);
+    Serial.print(F(" SpO2_1:")); Serial.print(participant1.spo2, 1);
     Serial.print(F(" State1:")); Serial.print(participant1.plotState());
     Serial.print(F(" Wave2:")); Serial.print(participant2.wave);
     Serial.print(F(" Beat2:")); Serial.print(millis() < participant2.beatFlashUntil ? 2500 : 0);
     Serial.print(F(" BPM2:")); Serial.print(participant2.bpm);
+    Serial.print(F(" HRV2:")); Serial.print(participant2.hrv);
+    Serial.print(F(" SpO2_2:")); Serial.print(participant2.spo2, 1);
     Serial.print(F(" State2:")); Serial.println(participant2.plotState());
 }

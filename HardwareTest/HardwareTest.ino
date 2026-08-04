@@ -1,11 +1,11 @@
 // HardwareTest.ino — serial menu-driven hardware test for "the interface"
 //
 // ASSUMPTIONS (confirm these match your hardware):
-//   Board      : Arduino Uno (or compatible)
+//   Board      : Arduino Uno R4 Minima
 //   LEDs       : WS2812B, 44 per strip — uses Adafruit NeoPixel library
 //   Motor IN2  : hardwired LOW (GND) on both DRV8833 boards; only IN1 is on Arduino
-//   Sensor 2   : SoftWire on A4 (SDA) / A5 (SCL) — same traces as hardware I2C on Uno
-//   PCA9515A   : bypassed / not in circuit
+//   Sensor 2   : SoftWire on A4 (SDA) / A5 (SCL) — same traces as hardware I2C on Uno R4
+//   PCA9515A   : physically removed from circuit, not in use
 //   Button     : A0 active-LOW (INPUT_PULLUP)
 //
 // SETUP BEFORE COMPILING:

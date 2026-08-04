@@ -8,7 +8,7 @@ experience, nudging both participants toward a shared "flow state" rhythm.
 
 ## Hardware overview
 
-One Arduino Uno runs everything. Each participant has:
+One Arduino Uno R4 Minima runs everything. Each participant has:
 
 - **Heart sensor** (MAX30102) — reads pulse via infrared light through skin
 - **Vibration motor** (DRV8833 driver) — rumble pack, tuned to feel like a heartbeat
@@ -26,11 +26,13 @@ Shared inputs:
 
 The main sketch provides a two-participant development visualizer over USB serial. Each participant is handled independently:
 
-1. **No contact** — the channel reports no BPM.
-2. **Calibrating** — the software adjusts that sensor's IR LED current until its signal is in a useful range, then waits for it to settle.
-3. **Tracking** — gain is locked, the DC component is removed, and adaptive peak detection produces a rolling BPM estimate.
+1. **No contact** — the channel reports no BPM/HRV/SpO2.
+2. **Calibrating** — the software adjusts that sensor's IR and Red LED current independently until each signal is in a useful range, then waits for both to settle.
+3. **Tracking** — gain is locked, the DC component is removed from both channels, and adaptive peak detection produces a rolling BPM estimate, an HRV (RMSSD) estimate, and a ratio-of-ratios SpO2 estimate.
 
-This lets people with different skin, finger placement, and signal strengths use either sensor without reflashing. Open Arduino IDE's Serial Plotter at 115200 baud to view `Wave1`, `Wave2`, `Beat1`, `Beat2`, `BPM1`, `BPM2`, `State1`, and `State2`. State values are 0 = no contact, 1 = calibrating, and 2 = tracking.
+This lets people with different skin, finger placement, and signal strengths use either sensor without reflashing. Open Arduino IDE's Serial Plotter at 115200 baud to view `Wave1`, `Wave2`, `Beat1`, `Beat2`, `BPM1`, `BPM2`, `HRV1`, `HRV2`, `SpO2_1`, `SpO2_2`, `State1`, and `State2`. State values are 0 = no contact, 1 = calibrating, and 2 = tracking.
+
+SpO2 is a simplified, uncalibrated ratio-of-ratios estimate (Red vs. IR AC/DC) — a biofeedback cue for this installation, not a medically accurate reading.
 
 ### LED behaviour
 
@@ -82,16 +84,16 @@ Everything depends on a reliable BPM number. Do these in order:
 ## Open questions
 
 - **LED strip type** — WS2812B assumed but not confirmed. Affects which library to use.
-- **Motor wiring** — DRV8833 needs two control pins per channel (IN1 + IN2). Only one Arduino pin is mapped per motor. Need to confirm whether IN2 is hardwired to GND or uses a second pin.
-- **PCA9515A I2C repeaters** — physically in circuit or removed? Currently bypassed in code.
 
 ---
 
 ## Technical constraints
 
-- Arduino Uno: one program, one loop. All logic (sensors, LEDs, motors) shares the same `loop()`.
+- Arduino Uno R4 Minima: one program, one loop. All logic (sensors, LEDs, motors) shares the same `loop()`.
 - Both heart sensors have the same I2C address (`0x57`). They are isolated on separate software I2C buses (SoftWire library) to avoid conflicts.
 - Hardware I2C (Wire library) caused intermittent bus lockups and was abandoned. SoftWire on bit-bang pins is the stable solution.
+- DRV8833 motor drivers: IN2 is hardwired to GND on both boards; only IN1 (D6, D13) is driven from the Arduino.
+- PCA9515A I2C repeaters are physically removed from the circuit, not just bypassed in code.
 
 ---
 

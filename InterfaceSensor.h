@@ -22,7 +22,9 @@ public:
 
     bool setupSensor();
     bool setIRLedAmplitude(byte amplitude);
+    bool setRedLedAmplitude(byte amplitude);
 
+    byte getOverflowCount();
 
     bool readFIFO(uint32_t &red, uint32_t &ir);
     long getIR();

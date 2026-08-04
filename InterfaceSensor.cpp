@@ -136,6 +136,25 @@ bool InterfaceSensor::setIRLedAmplitude(byte amplitude)
     return writeRegister(0x0D, amplitude);
 }
 
+bool InterfaceSensor::setRedLedAmplitude(byte amplitude)
+{
+    return writeRegister(0x0C, amplitude);
+}
+
+byte InterfaceSensor::getOverflowCount()
+{
+    byte count = readRegister(0x05);
+
+    // Explicitly clear rather than relying on the chip to auto-reset this on
+    // its own -- if it doesn't, a single overflow event latches this
+    // register nonzero forever and the caller's overflow handling never
+    // stops firing.
+    if (count > 0)
+        writeRegister(0x05, 0x00);
+
+    return count;
+}
+
 bool InterfaceSensor::readFIFO(uint32_t &red, uint32_t &ir)
 {
     byte data[6];

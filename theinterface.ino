@@ -26,6 +26,9 @@ const uint16_t GAIN_SETTLE_MS = 2500;
 const uint16_t MIN_BEAT_INTERVAL_MS = 300;
 const uint16_t MAX_BEAT_INTERVAL_MS = 2000;
 
+const long INITIAL_THRESHOLD = 120;   // starting/reset adaptive beat threshold
+const long MIN_THRESHOLD_FLOOR = 80;  // threshold never adapts below this
+
 const byte INTERVAL_BUFFER_SIZE = 8; // beat intervals kept for BPM averaging and HRV (RMSSD)
 
 const long SPO2_MIN_AC = 20;             // ignore ratio-of-ratios input this close to the noise floor
@@ -89,26 +92,24 @@ struct HeartChannel
         : sensor(sda, scl), state(NO_CONTACT),
           irLedCurrent(INITIAL_LED_CURRENT), dcEstimate(0), wave(0), positivePeak(0),
           redLedCurrent(INITIAL_LED_CURRENT), redDcEstimate(0), redWave(0), redPositivePeak(0),
-          threshold(120), sampleTime(0), lastBeatTime(0),
+          threshold(INITIAL_THRESHOLD), sampleTime(0), lastBeatTime(0),
           beatFlashUntil(0), lastGainAdjust(0), gainStableSince(0), motorTriggerTime(0),
           bpm(0), hrv(0), spo2(0),
           intervalCount(0), intervalIndex(0)
     {
     }
 
-    void enterNoContact()
+    // Fields reset the same way by all three state transitions below.
+    // dcEstimate/redDcEstimate, sampleTime, beatFlashUntil, and the gain
+    // settle timer differ per transition and are handled separately.
+    void resetBeatState()
     {
-        state = NO_CONTACT;
-        dcEstimate = 0;
         wave = 0;
         positivePeak = 0;
-        redDcEstimate = 0;
         redWave = 0;
         redPositivePeak = 0;
-        threshold = 120;
-        sampleTime = 0;
+        threshold = INITIAL_THRESHOLD;
         lastBeatTime = 0;
-        beatFlashUntil = 0;
         motorTriggerTime = 0;
         bpm = 0;
         hrv = 0;
@@ -117,25 +118,24 @@ struct HeartChannel
         intervalIndex = 0;
     }
 
+    void enterNoContact()
+    {
+        state = NO_CONTACT;
+        dcEstimate = 0;
+        redDcEstimate = 0;
+        sampleTime = 0;
+        beatFlashUntil = 0;
+        resetBeatState();
+    }
+
     void enterCalibration(long red, long ir)
     {
         state = CALIBRATING;
         dcEstimate = ir << 4;
-        wave = 0;
-        positivePeak = 0;
         redDcEstimate = red << 4;
-        redWave = 0;
-        redPositivePeak = 0;
-        threshold = 120;
         sampleTime = millis();
-        lastBeatTime = 0;
         beatFlashUntil = 0;
-        motorTriggerTime = 0;
-        bpm = 0;
-        hrv = 0;
-        spo2 = 0;
-        intervalCount = 0;
-        intervalIndex = 0;
+        resetBeatState();
         lastGainAdjust = 0;
         gainStableSince = millis();
     }
@@ -143,18 +143,7 @@ struct HeartChannel
     void enterTracking()
     {
         state = TRACKING;
-        wave = 0;
-        positivePeak = 0;
-        redWave = 0;
-        redPositivePeak = 0;
-        threshold = 120;
-        lastBeatTime = 0;
-        motorTriggerTime = 0;
-        intervalCount = 0;
-        intervalIndex = 0;
-        bpm = 0;
-        hrv = 0;
-        spo2 = 0;
+        resetBeatState();
     }
 
     static byte stepLedCurrent(byte current, long dcLevel)
@@ -345,8 +334,8 @@ struct HeartChannel
             updateSpO2();
 
             long nextThreshold = positivePeak / 2;
-            if (nextThreshold < 80)
-                nextThreshold = 80;
+            if (nextThreshold < MIN_THRESHOLD_FLOOR)
+                nextThreshold = MIN_THRESHOLD_FLOOR;
             threshold = (threshold * 3 + nextThreshold) / 4;
             positivePeak = 0;
             redPositivePeak = 0;
@@ -405,6 +394,20 @@ void readChannel(HeartChannel &channel)
     }
 }
 
+// Prints one channel's fields with the given participant suffix ('1' or
+// '2'). Field order/text matches the original hand-duplicated version
+// exactly, so Serial Plotter label parsing is unaffected.
+void printChannel(const HeartChannel &channel, char suffix, byte motor)
+{
+    Serial.print(F("Wave")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.wave);
+    Serial.print(F(" Beat")); Serial.print(suffix); Serial.print(':'); Serial.print(millis() < channel.beatFlashUntil ? 2500 : 0);
+    Serial.print(F(" BPM")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.bpm);
+    Serial.print(F(" HRV")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.hrv);
+    Serial.print(F(" SpO2_")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.spo2, 1);
+    Serial.print(F(" Motor")); Serial.print(suffix); Serial.print(':'); Serial.print(motor);
+    Serial.print(F(" State")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.plotState());
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -430,28 +433,24 @@ void loop()
     readChannel(participant1);
     readChannel(participant2);
 
+    // Sampled once per loop and reused for both the motor write and the
+    // (throttled) print below, so the printed Motor value always matches
+    // exactly what was written to the pin this iteration.
+    byte motor1 = participant1.motorIntensity();
+    byte motor2 = participant2.motorIntensity();
+
     // Updated every loop() iteration (not gated by the plot throttle below)
     // so the ramp envelope is smooth rather than stepping in 40 ms chunks.
-    analogWrite(MOTOR1_PIN, participant1.motorIntensity());
-    analogWrite(MOTOR2_PIN, participant2.motorIntensity());
+    analogWrite(MOTOR1_PIN, motor1);
+    analogWrite(MOTOR2_PIN, motor2);
 
     if (millis() - lastPlotMs < 40)
         return;
     lastPlotMs = millis();
 
     // Clean plot output. State: 0 = no contact, 1 = calibrating, 2 = tracking.
-    Serial.print(F("Wave1:")); Serial.print(participant1.wave);
-    Serial.print(F(" Beat1:")); Serial.print(millis() < participant1.beatFlashUntil ? 2500 : 0);
-    Serial.print(F(" BPM1:")); Serial.print(participant1.bpm);
-    Serial.print(F(" HRV1:")); Serial.print(participant1.hrv);
-    Serial.print(F(" SpO2_1:")); Serial.print(participant1.spo2, 1);
-    Serial.print(F(" Motor1:")); Serial.print(participant1.motorIntensity());
-    Serial.print(F(" State1:")); Serial.print(participant1.plotState());
-    Serial.print(F(" Wave2:")); Serial.print(participant2.wave);
-    Serial.print(F(" Beat2:")); Serial.print(millis() < participant2.beatFlashUntil ? 2500 : 0);
-    Serial.print(F(" BPM2:")); Serial.print(participant2.bpm);
-    Serial.print(F(" HRV2:")); Serial.print(participant2.hrv);
-    Serial.print(F(" SpO2_2:")); Serial.print(participant2.spo2, 1);
-    Serial.print(F(" Motor2:")); Serial.print(participant2.motorIntensity());
-    Serial.print(F(" State2:")); Serial.println(participant2.plotState());
+    printChannel(participant1, '1', motor1);
+    Serial.print(' ');
+    printChannel(participant2, '2', motor2);
+    Serial.println();
 }

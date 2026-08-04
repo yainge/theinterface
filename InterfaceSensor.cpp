@@ -3,6 +3,11 @@
 InterfaceSensor::InterfaceSensor(uint8_t sdaPin, uint8_t sclPin)
     : i2c(sdaPin, sclPin)
 {
+    // SoftWire's Wire-compatible API needs caller-owned buffers.  The
+    // low-level API happened to work on AVR, but its repeated-start reads
+    // are unreliable on the UNO R4's Renesas core.
+    i2c.setTxBuffer(txBuffer, sizeof(txBuffer));
+    i2c.setRxBuffer(rxBuffer, sizeof(rxBuffer));
 }
 
 bool InterfaceSensor::begin()
@@ -27,38 +32,29 @@ byte InterfaceSensor::getFIFOCount()
 }
 byte InterfaceSensor::readRegister(byte reg)
 {
-    byte value = 0;
-    byte errors = 0;
+    i2c.beginTransmission(ADDRESS);
+    if (i2c.write(reg) != 1 || i2c.endTransmission(false) != 0)
+    {
+        i2c.stop();
+        return 0;
+    }
 
-    errors += i2c.startWait(ADDRESS, SoftWire::writeMode);
-
-    errors += i2c.write(reg);
-
-    errors += i2c.repeatedStart(ADDRESS, SoftWire::readMode);
-
-    errors += i2c.readThenNack(value);
-
-    i2c.stop();
-
-    if(errors)
+    if (i2c.requestFrom(ADDRESS, (uint8_t)1, true) != 1)
         return 0;
 
-    return value;
+    return (byte)i2c.read();
 }
 
 bool InterfaceSensor::writeRegister(byte reg, byte value)
 {
-    byte errors = 0;
+    i2c.beginTransmission(ADDRESS);
+    if (i2c.write(reg) != 1 || i2c.write(value) != 1)
+    {
+        i2c.stop();
+        return false;
+    }
 
-    errors += i2c.startWait(ADDRESS, SoftWire::writeMode);
-
-    errors += i2c.write(reg);
-
-    errors += i2c.write(value);
-
-    i2c.stop();
-
-    return (errors == 0);
+    return i2c.endTransmission(true) == 0;
 }
 
 bool InterfaceSensor::reset()
@@ -117,10 +113,10 @@ bool InterfaceSensor::setupSensor()
 
     // LED pulse amplitude
     // Red LED
-    writeRegister(0x0C, 0x3F);
+    writeRegister(0x0C, 0x30);
 
     // IR LED
-    writeRegister(0x0D, 0x3F);
+    writeRegister(0x0D, 0x30);
 
 
     // Clear FIFO again after configuration
@@ -138,32 +134,18 @@ bool InterfaceSensor::setupSensor()
 bool InterfaceSensor::readFIFO(uint32_t &red, uint32_t &ir)
 {
     byte data[6];
-    byte errors = 0;
-
-
-    // Point to FIFO_DATA register
-    errors += i2c.startWait(ADDRESS, SoftWire::writeMode);
-
-    errors += i2c.write(0x07);
-
-
-    // Switch to reading
-    errors += i2c.repeatedStart(ADDRESS, SoftWire::readMode);
-
-
-    for(int i = 0; i < 5; i++)
+    i2c.beginTransmission(ADDRESS);
+    if (i2c.write(0x07) != 1 || i2c.endTransmission(false) != 0)
     {
-        errors += i2c.readThenAck(data[i]);
+        i2c.stop();
+        return false;
     }
 
-    errors += i2c.readThenNack(data[5]);
-
-
-    i2c.stop();
-
-
-    if(errors)
+    if (i2c.requestFrom(ADDRESS, (uint8_t)6, true) != 6)
         return false;
+
+    for (byte i = 0; i < 6; ++i)
+        data[i] = (byte)i2c.read();
 
 
     // MAX30102 uses 18-bit values

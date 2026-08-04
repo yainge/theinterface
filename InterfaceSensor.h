@@ -29,6 +29,8 @@ public:
 private:
 
     SoftWire i2c;
+    byte txBuffer[2];
+    byte rxBuffer[6];
 
     static const byte ADDRESS = 0x57;
 };

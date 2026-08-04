@@ -54,6 +54,12 @@ sensor logic all share a single `setup()`/`loop()`.
 
 Sensor wiring colours: SCL=Yellow, SDA=Blue, GND=Green, PWR=Red.
 
+**Motor/sensor pairing is cross-wired, not number-matched:** the D8/D9 (Sensor 1)
+participant's beat drives the D13 (Motor Driver 2) motor, and the SDA/SCL (Sensor 2)
+participant's beat drives the D6 (Motor Driver 1) motor. `theinterface.ino` names its
+motor pin constants by pin (`MOTOR_PIN_D6`/`MOTOR_PIN_D13`) rather than participant number
+to keep this pairing explicit at the call site instead of implicit.
+
 ### Open hardware unknowns
 
 - **LED strip type** — WS2812B assumed; confirm before writing LED library calls.

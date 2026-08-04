@@ -47,10 +47,14 @@ The two LED strips run independently and reflect each participant's heartrate in
 
 ### Motor behaviour
 
-The vibration motor fires on each detected heartbeat with a linear ramp up (40 ms) and
-ramp down (200 ms) — a felt pulse rather than an abrupt on/off click. Peak intensity is
-currently a fixed constant (`MOTOR_PEAK_INTENSITY` in `theinterface.ino`); potentiometer
-control is not wired in yet.
+Each motor fires on its paired participant's detected heartbeat with a linear ramp up
+(40 ms) and ramp down (200 ms) — a felt pulse rather than an abrupt on/off click. Peak
+intensity is currently a fixed constant (`MOTOR_PEAK_INTENSITY` in `theinterface.ino`);
+potentiometer control is not wired in yet.
+
+Motor/sensor pairing is cross-wired per the physical build: the D8/D9 sensor's
+participant feels the D13 motor, and the SDA/SCL sensor's participant feels the D6
+motor — see CLAUDE.md's pin assignments for the full wiring.
 
 ---
 

@@ -8,8 +8,13 @@ const uint8_t SENSOR1_SCL = 9;
 const uint8_t SENSOR2_SDA = A4;
 const uint8_t SENSOR2_SCL = A5;
 
-const uint8_t MOTOR1_PIN = 6;
-const uint8_t MOTOR2_PIN = 13;
+// Motor driver wiring is cross-paired with sensor wiring, not matched by
+// number: the D8/D9 (participant 1) sensor's beat drives the D13 motor, and
+// the SDA/SCL (participant 2) sensor's beat drives the D6 motor. Named by
+// pin rather than participant number to keep that pairing explicit here
+// instead of implicit in the analogWrite() call sites below.
+const uint8_t MOTOR_PIN_D6 = 6;
+const uint8_t MOTOR_PIN_D13 = 13;
 
 const long CONTACT_DETECTED_IR = 6000;
 const long GAIN_TARGET_LOW = 90000;
@@ -413,10 +418,10 @@ void setup()
     Serial.begin(115200);
     delay(1500);
 
-    pinMode(MOTOR1_PIN, OUTPUT);
-    pinMode(MOTOR2_PIN, OUTPUT);
-    analogWrite(MOTOR1_PIN, 0);
-    analogWrite(MOTOR2_PIN, 0);
+    pinMode(MOTOR_PIN_D6, OUTPUT);
+    pinMode(MOTOR_PIN_D13, OUTPUT);
+    analogWrite(MOTOR_PIN_D6, 0);
+    analogWrite(MOTOR_PIN_D13, 0);
 
     Serial.println(F("The Interface - HR Visualizer"));
     bool sensor1Ready = startSensor(participant1, F("Sensor 1"));
@@ -441,8 +446,10 @@ void loop()
 
     // Updated every loop() iteration (not gated by the plot throttle below)
     // so the ramp envelope is smooth rather than stepping in 40 ms chunks.
-    analogWrite(MOTOR1_PIN, motor1);
-    analogWrite(MOTOR2_PIN, motor2);
+    // Cross-paired per the wiring: participant 1 (D8/D9 sensor) -> D13
+    // motor, participant 2 (SDA/SCL sensor) -> D6 motor.
+    analogWrite(MOTOR_PIN_D13, motor1);
+    analogWrite(MOTOR_PIN_D6, motor2);
 
     if (millis() - lastPlotMs < 40)
         return;

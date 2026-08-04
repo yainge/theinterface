@@ -16,6 +16,7 @@ All notable changes to The Interface are documented here.
 - FIFO overflow detection (`OVF_COUNTER`) that forces a clean recalibration instead of computing BPM/HRV/SpO2 against desynced timing after dropped samples.
 - Clean Arduino Serial Plotter fields: `Wave1`, `Wave2`, `Beat1`, `Beat2`, `BPM1`, `BPM2`, `HRV1`, `HRV2`, `SpO2_1`, `SpO2_2`, `State1`, and `State2`.
 - `InterfaceSensor::setIRLedAmplitude()` / `setRedLedAmplitude()` for runtime LED-current control, and `getOverflowCount()` for FIFO overflow detection.
+- Non-blocking motor pulse envelope (`HeartChannel::motorIntensity()`): linear ramp up (40 ms) / ramp down (200 ms) on each detected beat, driven via `analogWrite` on D6/D13. Peak intensity is a fixed constant for now; potentiometer control is a follow-up. `Motor1`/`Motor2` added to the Serial Plotter output for tuning.
 
 ### Changed
 

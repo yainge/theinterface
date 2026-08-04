@@ -47,8 +47,10 @@ The two LED strips run independently and reflect each participant's heartrate in
 
 ### Motor behaviour
 
-The vibration motor fires on each detected heartbeat with a smooth onset — not a click,
-but a felt pulse. Intensity is tunable via the potentiometer.
+The vibration motor fires on each detected heartbeat with a linear ramp up (40 ms) and
+ramp down (200 ms) — a felt pulse rather than an abrupt on/off click. Peak intensity is
+currently a fixed constant (`MOTOR_PEAK_INTENSITY` in `theinterface.ino`); potentiometer
+control is not wired in yet.
 
 ---
 

@@ -8,6 +8,9 @@ const uint8_t SENSOR1_SCL = 9;
 const uint8_t SENSOR2_SDA = A4;
 const uint8_t SENSOR2_SCL = A5;
 
+const uint8_t MOTOR1_PIN = 6;
+const uint8_t MOTOR2_PIN = 13;
+
 const long CONTACT_DETECTED_IR = 6000;
 const long GAIN_TARGET_LOW = 90000;
 const long GAIN_TARGET_HIGH = 225000;
@@ -37,6 +40,13 @@ const float SPO2_SMOOTHING = 0.1;        // low-pass filter weight applied to ea
 const double SPO2_RATIO_INTERCEPT = 110.0;
 const double SPO2_RATIO_SLOPE = 25.0;
 
+// Motor pulse envelope: linear ramp up, linear ramp down -- avoids the
+// abrupt "click" of just switching the motor on/off. Peak intensity is a
+// fixed placeholder until the potentiometer is wired in to control it.
+const uint16_t MOTOR_ATTACK_MS = 40;
+const uint16_t MOTOR_DECAY_MS = 200;
+const byte MOTOR_PEAK_INTENSITY = 180; // 0-255 analogWrite duty cycle
+
 enum ChannelState : byte
 {
     NO_CONTACT,
@@ -65,6 +75,7 @@ struct HeartChannel
     unsigned long beatFlashUntil;
     unsigned long lastGainAdjust;
     unsigned long gainStableSince;
+    unsigned long motorTriggerTime;
 
     uint16_t bpm;
     uint16_t hrv;
@@ -79,7 +90,7 @@ struct HeartChannel
           irLedCurrent(INITIAL_LED_CURRENT), dcEstimate(0), wave(0), positivePeak(0),
           redLedCurrent(INITIAL_LED_CURRENT), redDcEstimate(0), redWave(0), redPositivePeak(0),
           threshold(120), sampleTime(0), lastBeatTime(0),
-          beatFlashUntil(0), lastGainAdjust(0), gainStableSince(0),
+          beatFlashUntil(0), lastGainAdjust(0), gainStableSince(0), motorTriggerTime(0),
           bpm(0), hrv(0), spo2(0),
           intervalCount(0), intervalIndex(0)
     {
@@ -98,6 +109,7 @@ struct HeartChannel
         sampleTime = 0;
         lastBeatTime = 0;
         beatFlashUntil = 0;
+        motorTriggerTime = 0;
         bpm = 0;
         hrv = 0;
         spo2 = 0;
@@ -118,6 +130,7 @@ struct HeartChannel
         sampleTime = millis();
         lastBeatTime = 0;
         beatFlashUntil = 0;
+        motorTriggerTime = 0;
         bpm = 0;
         hrv = 0;
         spo2 = 0;
@@ -136,6 +149,7 @@ struct HeartChannel
         redPositivePeak = 0;
         threshold = 120;
         lastBeatTime = 0;
+        motorTriggerTime = 0;
         intervalCount = 0;
         intervalIndex = 0;
         bpm = 0;
@@ -224,6 +238,28 @@ struct HeartChannel
 
         hrv = computeRMSSD();
         beatFlashUntil = millis() + 120;
+        motorTriggerTime = millis();
+    }
+
+    // Linear ramp up over MOTOR_ATTACK_MS, then linear ramp down over
+    // MOTOR_DECAY_MS. Purely a function of elapsed time since the last
+    // triggered beat, so it can be sampled every loop() iteration for a
+    // smooth envelope without any extra per-loop bookkeeping.
+    byte motorIntensity() const
+    {
+        if (motorTriggerTime == 0)
+            return 0;
+
+        unsigned long elapsed = millis() - motorTriggerTime;
+
+        if (elapsed < MOTOR_ATTACK_MS)
+            return (byte)((unsigned long)MOTOR_PEAK_INTENSITY * elapsed / MOTOR_ATTACK_MS);
+
+        elapsed -= MOTOR_ATTACK_MS;
+        if (elapsed < MOTOR_DECAY_MS)
+            return (byte)((unsigned long)MOTOR_PEAK_INTENSITY * (MOTOR_DECAY_MS - elapsed) / MOTOR_DECAY_MS);
+
+        return 0;
     }
 
     // Ratio-of-ratios SpO2 estimate, evaluated once per full waveform cycle
@@ -383,6 +419,11 @@ void setup()
     Serial.begin(115200);
     delay(1500);
 
+    pinMode(MOTOR1_PIN, OUTPUT);
+    pinMode(MOTOR2_PIN, OUTPUT);
+    analogWrite(MOTOR1_PIN, 0);
+    analogWrite(MOTOR2_PIN, 0);
+
     Serial.println(F("The Interface - HR Visualizer"));
     bool sensor1Ready = startSensor(participant1, F("Sensor 1"));
     bool sensor2Ready = startSensor(participant2, F("Sensor 2"));
@@ -398,6 +439,11 @@ void loop()
     readChannel(participant1);
     readChannel(participant2);
 
+    // Updated every loop() iteration (not gated by the plot throttle below)
+    // so the ramp envelope is smooth rather than stepping in 40 ms chunks.
+    analogWrite(MOTOR1_PIN, participant1.motorIntensity());
+    analogWrite(MOTOR2_PIN, participant2.motorIntensity());
+
     if (millis() - lastPlotMs < 40)
         return;
     lastPlotMs = millis();
@@ -408,11 +454,13 @@ void loop()
     Serial.print(F(" BPM1:")); Serial.print(participant1.bpm);
     Serial.print(F(" HRV1:")); Serial.print(participant1.hrv);
     Serial.print(F(" SpO2_1:")); Serial.print(participant1.spo2, 1);
+    Serial.print(F(" Motor1:")); Serial.print(participant1.motorIntensity());
     Serial.print(F(" State1:")); Serial.print(participant1.plotState());
     Serial.print(F(" Wave2:")); Serial.print(participant2.wave);
     Serial.print(F(" Beat2:")); Serial.print(millis() < participant2.beatFlashUntil ? 2500 : 0);
     Serial.print(F(" BPM2:")); Serial.print(participant2.bpm);
     Serial.print(F(" HRV2:")); Serial.print(participant2.hrv);
     Serial.print(F(" SpO2_2:")); Serial.print(participant2.spo2, 1);
+    Serial.print(F(" Motor2:")); Serial.print(participant2.motorIntensity());
     Serial.print(F(" State2:")); Serial.println(participant2.plotState());
 }

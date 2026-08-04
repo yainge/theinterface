@@ -159,7 +159,10 @@ Each strip is independent; strip 1 = participant 1's heartrate, strip 2 = partic
    - A nonzero `OVF_COUNTER` forces a channel back to `NO_CONTACT` so lost FIFO samples never silently desync the timing these metrics depend on.
    - Validate the displayed BPM against a manually counted pulse before treating it as ready for the installation.
 
-2. **Motor modulation** — smooth onset, feels like a heartbeat, tuned via potentiometer.
+2. **Motor modulation** — implemented. Each detected beat triggers a non-blocking linear
+   ramp up/down (`HeartChannel::motorIntensity()`), driven via `analogWrite` on D6/D13
+   with IN2 hardwired to GND. Peak intensity is a fixed constant for now; potentiometer
+   control is not wired in yet.
 
 3. **LED coherence logic** — async dual-strip, brightness pulse on beat, sync logic when
    BPM delta ≤ 5–10.

@@ -53,12 +53,24 @@ const float SPO2_SMOOTHING = 0.1;        // low-pass filter weight applied to ea
 const double SPO2_RATIO_INTERCEPT = 110.0;
 const double SPO2_RATIO_SLOPE = 25.0;
 
-// Motor pulse envelope: linear ramp up, linear ramp down -- avoids the
-// abrupt "click" of just switching the motor on/off. Peak intensity is a
-// fixed placeholder until the potentiometer is wired in to control it.
-const uint16_t MOTOR_ATTACK_MS = 40;
-const uint16_t MOTOR_DECAY_MS = 200;
+// Motor pulse envelope: two short linear ramp-up/ramp-down lobes per beat
+// ("bum-bum") rather than one single pulse, mimicking the lub-dub of a real
+// heartbeat. Peak intensity is a fixed placeholder until the potentiometer
+// is wired in to control it.
+const uint16_t LOBE1_ATTACK_MS = 30;
+const uint16_t LOBE1_DECAY_MS = 90;
+const uint16_t LOBE_GAP_MS = 120;     // silence between the two lobes
+const uint16_t LOBE2_ATTACK_MS = 25;
+const uint16_t LOBE2_DECAY_MS = 90;
+const float LOBE2_PEAK_SCALE = 0.7;   // second lobe a bit softer than the first, like a real "dub"
 const byte MOTOR_PEAK_INTENSITY = 180; // 0-255 analogWrite duty cycle
+
+// EXPERIMENTAL (this branch only): motor feedback starts by following each
+// raw detected beat, then after this long in TRACKING switches to a steady
+// pulse timed off the rolling BPM average instead of individual beat
+// jitter. BPM/HRV/SpO2 computation is unaffected either way -- this only
+// changes what schedules the motor's two-tone pulse.
+const unsigned long MOTOR_STEADY_TRANSITION_MS = 7000;
 
 enum ChannelState : byte
 {
@@ -89,6 +101,8 @@ struct HeartChannel
     unsigned long lastGainAdjust;
     unsigned long gainStableSince;
     unsigned long motorTriggerTime;
+    unsigned long trackingStartTime;
+    unsigned long nextSteadyPulseTime;
 
     uint16_t bpm;
     uint16_t hrv;
@@ -104,6 +118,7 @@ struct HeartChannel
           redLedCurrent(INITIAL_LED_CURRENT), redDcEstimate(0), redWave(0), redPositivePeak(0),
           threshold(INITIAL_THRESHOLD), sampleTime(0), lastBeatTime(0),
           beatFlashUntil(0), lastGainAdjust(0), gainStableSince(0), motorTriggerTime(0),
+          trackingStartTime(0), nextSteadyPulseTime(0),
           bpm(0), hrv(0), spo2(0),
           intervalCount(0), intervalIndex(0)
     {
@@ -154,6 +169,41 @@ struct HeartChannel
     {
         state = TRACKING;
         resetBeatState();
+        // Starts the raw-feedback phase timer fresh every time tracking
+        // (re)starts, e.g. after a contact loss -- see MOTOR_STEADY_TRANSITION_MS.
+        trackingStartTime = millis();
+        nextSteadyPulseTime = 0;
+    }
+
+    // True once MOTOR_STEADY_TRANSITION_MS has elapsed in TRACKING and a
+    // BPM estimate exists to time a steady pulse off of.
+    bool inSteadyMotorMode() const
+    {
+        return state == TRACKING && bpm > 0 &&
+               (millis() - trackingStartTime) >= MOTOR_STEADY_TRANSITION_MS;
+    }
+
+    // EXPERIMENTAL: once in steady mode, fires a motor pulse on a fixed
+    // schedule derived from the rolling BPM average instead of individual
+    // raw beat detections. Call once per loop() iteration (time-based, not
+    // tied to FIFO sample processing).
+    void updateMotorSchedule()
+    {
+        if (state != TRACKING)
+            return;
+
+        if (!inSteadyMotorMode())
+        {
+            nextSteadyPulseTime = 0; // re-arm so the first steady pulse fires promptly on transition
+            return;
+        }
+
+        unsigned long now = millis();
+        if (nextSteadyPulseTime == 0 || now >= nextSteadyPulseTime)
+        {
+            motorTriggerTime = now;
+            nextSteadyPulseTime = now + 60000UL / bpm;
+        }
     }
 
     static byte stepLedCurrent(byte current, long dcLevel)
@@ -241,25 +291,44 @@ struct HeartChannel
         hrv = computeRMSSD();
     }
 
-    // Linear ramp up over MOTOR_ATTACK_MS, then linear ramp down over
-    // MOTOR_DECAY_MS. Purely a function of elapsed time since the last
-    // triggered beat, so it can be sampled every loop() iteration for a
-    // smooth envelope without any extra per-loop bookkeeping.
+    // Linear ramp up over attackMs, then linear ramp down over decayMs,
+    // scaled to peak. Shared shape for both lobes of the two-tone envelope.
+    static byte lobeIntensity(unsigned long elapsed, uint16_t attackMs, uint16_t decayMs, byte peak)
+    {
+        if (elapsed < attackMs)
+            return (byte)((unsigned long)peak * elapsed / attackMs);
+
+        elapsed -= attackMs;
+        if (elapsed < decayMs)
+            return (byte)((unsigned long)peak * (decayMs - elapsed) / decayMs);
+
+        return 0;
+    }
+
+    // Two-tone "bum-bum" heartbeat feel: a full-intensity lobe, a short
+    // silence, then a softer second lobe -- purely a function of elapsed
+    // time since motorTriggerTime, so it can be sampled every loop()
+    // iteration for a smooth envelope without extra per-loop bookkeeping.
+    // What sets motorTriggerTime (raw beat detection vs. the steady BPM
+    // schedule) is decided elsewhere; this only shapes each pulse.
     byte motorIntensity() const
     {
         if (motorTriggerTime == 0)
             return 0;
 
         unsigned long elapsed = millis() - motorTriggerTime;
+        const uint16_t lobe1Duration = LOBE1_ATTACK_MS + LOBE1_DECAY_MS;
 
-        if (elapsed < MOTOR_ATTACK_MS)
-            return (byte)((unsigned long)MOTOR_PEAK_INTENSITY * elapsed / MOTOR_ATTACK_MS);
+        if (elapsed < lobe1Duration)
+            return lobeIntensity(elapsed, LOBE1_ATTACK_MS, LOBE1_DECAY_MS, MOTOR_PEAK_INTENSITY);
 
-        elapsed -= MOTOR_ATTACK_MS;
-        if (elapsed < MOTOR_DECAY_MS)
-            return (byte)((unsigned long)MOTOR_PEAK_INTENSITY * (MOTOR_DECAY_MS - elapsed) / MOTOR_DECAY_MS);
+        elapsed -= lobe1Duration;
+        if (elapsed < LOBE_GAP_MS)
+            return 0;
 
-        return 0;
+        elapsed -= LOBE_GAP_MS;
+        byte lobe2Peak = (byte)(MOTOR_PEAK_INTENSITY * LOBE2_PEAK_SCALE);
+        return lobeIntensity(elapsed, LOBE2_ATTACK_MS, LOBE2_DECAY_MS, lobe2Peak);
     }
 
     // Ratio-of-ratios SpO2 estimate, evaluated once per full waveform cycle
@@ -347,7 +416,11 @@ struct HeartChannel
                 // and a suppressed motor pulse reads as "sometimes nothing
                 // happens" even though the sensor saw a real beat.
                 beatFlashUntil = millis() + 120;
-                motorTriggerTime = millis();
+
+                // EXPERIMENTAL: once in steady mode, updateMotorSchedule()
+                // owns motorTriggerTime instead of raw beat detection.
+                if (!inSteadyMotorMode())
+                    motorTriggerTime = millis();
             }
 
             updateSpO2();
@@ -428,6 +501,8 @@ void printChannel(const HeartChannel &channel, char suffix, byte motor)
     Serial.print(F(" SpO2_")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.spo2, 1);
     Serial.print(F(" Motor")); Serial.print(suffix); Serial.print(':'); Serial.print(motor);
     Serial.print(F(" State")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.plotState());
+    // EXPERIMENTAL: 0 = following raw beat detection, 1 = steady BPM pulse.
+    Serial.print(F(" Mode")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.inSteadyMotorMode() ? 1 : 0);
 }
 
 void setup()
@@ -454,6 +529,12 @@ void loop()
 {
     readChannel(participant1);
     readChannel(participant2);
+
+    // EXPERIMENTAL: advances the steady-BPM pulse schedule once in steady
+    // mode. No-op (and harmless) outside TRACKING or during the initial
+    // raw-feedback phase -- see MOTOR_STEADY_TRANSITION_MS.
+    participant1.updateMotorSchedule();
+    participant2.updateMotorSchedule();
 
     // Sampled once per loop and reused for both the motor write and the
     // (throttled) print below, so the printed Motor value always matches

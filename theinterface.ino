@@ -1,4 +1,5 @@
 #include "InterfaceSensor.h"
+#include <Adafruit_NeoPixel.h>
 #include <math.h>
 
 // Open Tools > Serial Plotter at 115200 baud. The sketch emits one labelled
@@ -7,6 +8,22 @@ const uint8_t SENSOR1_SDA = 8;
 const uint8_t SENSOR1_SCL = 9;
 const uint8_t SENSOR2_SDA = A4;
 const uint8_t SENSOR2_SCL = A5;
+
+const uint8_t LED_PIN_1 = 7;
+const uint8_t LED_PIN_2 = 12;
+const uint8_t LED_COUNT = 44;
+
+// Beat pulse color (RGB — Adafruit NeoPixel handles GRB byte reordering internally)
+const uint8_t BEAT_R = 220;
+const uint8_t BEAT_G = 60;
+const uint8_t BEAT_B = 0;
+
+const uint8_t LED_AMBIENT_FLOOR = 8;   // minimum per-pixel brightness between beats
+const uint8_t LED_SPARKLE_PEAK = 120;  // peak brightness when a new sparkle fires
+const uint8_t NUM_SPARKLES = 6;        // independent twinkling points per strip
+const uint8_t LED_BEAT_DECAY = 12;     // beat pulse fades by this per 20 ms frame (~420 ms total)
+const uint8_t LED_PIXEL_DECAY = 3;     // per-pixel ambient brightness decay per frame
+const uint16_t LED_UPDATE_MS = 20;     // 50 fps
 
 // Motor driver wiring is cross-paired with sensor wiring, not matched by
 // number: the D8/D9 (participant 1) sensor's beat drives the D13 motor, and
@@ -443,6 +460,112 @@ struct HeartChannel
     }
 };
 
+// ── LED rendering ─────────────────────────────────────────────────────────────
+//
+// Each strip has:
+//   - A per-pixel brightness array that decays slowly toward an ambient floor,
+//     with a handful of "sparkles" that pop up at random positions and fade out
+//     to create a twinkling baseline.
+//   - A beat pulse value (0-255) that jumps to full on each new detected beat
+//     and decays over ~420 ms, additively brightening all pixels.
+//
+// Timing: the strip is re-rendered at LED_UPDATE_MS (20 ms / 50 fps), which is
+// independent of the sensor FIFO poll rate (40 ms). NeoPixel show() disables
+// interrupts for ~1.3 ms (44 LEDs × 30 µs); SoftWire is purely software-timed
+// so they don't interfere — just keep show() out of the middle of readChannel().
+struct LedState
+{
+    uint8_t pxBright[LED_COUNT];
+    uint8_t beatPulse;
+    unsigned long lastBeatFlash;   // last beatFlashUntil value we've seen; used
+                                   // to detect a new beat without re-triggering
+                                   // on every loop iteration during the flash window
+    unsigned long lastUpdate;
+
+    uint8_t sparklePos[NUM_SPARKLES];
+    uint8_t sparkleTimer[NUM_SPARKLES]; // counts down; when 0, pick a new position
+
+    void begin()
+    {
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+            pxBright[i] = LED_AMBIENT_FLOOR;
+        beatPulse = 0;
+        lastBeatFlash = 0;
+        lastUpdate = 0;
+        for (uint8_t i = 0; i < NUM_SPARKLES; i++)
+        {
+            sparklePos[i] = random(LED_COUNT);
+            sparkleTimer[i] = random(10, 40);
+        }
+    }
+
+    // Call once per loop() — detects a newly set beatFlashUntil and arms the pulse.
+    void checkBeat(unsigned long beatFlashUntil)
+    {
+        if (beatFlashUntil != lastBeatFlash && beatFlashUntil > millis())
+        {
+            beatPulse = 255;
+            lastBeatFlash = beatFlashUntil;
+        }
+    }
+
+    bool needsUpdate() const { return millis() - lastUpdate >= LED_UPDATE_MS; }
+
+    void update(Adafruit_NeoPixel &strip)
+    {
+        lastUpdate = millis();
+
+        // Decay the beat pulse
+        if (beatPulse > LED_BEAT_DECAY)
+            beatPulse -= LED_BEAT_DECAY;
+        else
+            beatPulse = 0;
+
+        // Decay per-pixel brightness toward the ambient floor
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+        {
+            if (pxBright[i] > LED_AMBIENT_FLOOR + LED_PIXEL_DECAY)
+                pxBright[i] -= LED_PIXEL_DECAY;
+            else
+                pxBright[i] = LED_AMBIENT_FLOOR;
+        }
+
+        // Advance sparkles: when a timer expires, light a new random pixel
+        for (uint8_t i = 0; i < NUM_SPARKLES; i++)
+        {
+            if (sparkleTimer[i] == 0)
+            {
+                sparklePos[i] = random(LED_COUNT);
+                pxBright[sparklePos[i]] = random(LED_SPARKLE_PEAK / 2, LED_SPARKLE_PEAK);
+                sparkleTimer[i] = random(15, 50);
+            }
+            else
+            {
+                sparkleTimer[i]--;
+            }
+        }
+
+        // Write pixels: ambient sparkle brightness + additive beat pulse, clamped to 255
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+        {
+            uint16_t b = (uint16_t)pxBright[i] + beatPulse;
+            if (b > 255) b = 255;
+            uint8_t bv = (uint8_t)b;
+            strip.setPixelColor(i, strip.Color(
+                (uint8_t)((uint16_t)BEAT_R * bv / 255),
+                (uint8_t)((uint16_t)BEAT_G * bv / 255),
+                (uint8_t)((uint16_t)BEAT_B * bv / 255)
+            ));
+        }
+        strip.show();
+    }
+};
+
+Adafruit_NeoPixel strip1(LED_COUNT, LED_PIN_1, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip2(LED_COUNT, LED_PIN_2, NEO_GRB + NEO_KHZ800);
+
+LedState leds1, leds2;
+
 HeartChannel participant1(SENSOR1_SDA, SENSOR1_SCL);
 HeartChannel participant2(SENSOR2_SDA, SENSOR2_SCL);
 
@@ -515,6 +638,11 @@ void setup()
     analogWrite(MOTOR_PIN_D6, 0);
     analogWrite(MOTOR_PIN_D13, 0);
 
+    strip1.begin(); strip1.clear(); strip1.show();
+    strip2.begin(); strip2.clear(); strip2.show();
+    leds1.begin();
+    leds2.begin();
+
     Serial.println(F("The Interface - HR Visualizer"));
     bool sensor1Ready = startSensor(participant1, F("Sensor 1"));
     bool sensor2Ready = startSensor(participant2, F("Sensor 2"));
@@ -548,6 +676,13 @@ void loop()
     // motor, participant 2 (SDA/SCL sensor) -> D6 motor.
     analogWrite(MOTOR_PIN_D13, motor1);
     analogWrite(MOTOR_PIN_D6, motor2);
+
+    // Check for new beats and update LED strips at 50 fps.
+    // Called after sensor reads so show() never interrupts a SoftWire transaction.
+    leds1.checkBeat(participant1.beatFlashUntil);
+    leds2.checkBeat(participant2.beatFlashUntil);
+    if (leds1.needsUpdate()) leds1.update(strip1);
+    if (leds2.needsUpdate()) leds2.update(strip2);
 
     if (millis() - lastPlotMs < 40)
         return;

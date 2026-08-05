@@ -33,6 +33,11 @@ const uint16_t MAX_BEAT_INTERVAL_MS = 2000;
 
 const long INITIAL_THRESHOLD = 120;   // starting/reset adaptive beat threshold
 const long MIN_THRESHOLD_FLOOR = 80;  // threshold never adapts below this
+const long THRESHOLD_MAX_STEP_RATIO = 2; // cap how far a single cycle can push the
+                                          // threshold target up, so one noise spike
+                                          // (motion artifact, bad I2C sample) can't
+                                          // inflate it and suppress real beats for
+                                          // several seconds while it decays back down
 
 const byte INTERVAL_BUFFER_SIZE = 8; // beat intervals kept for BPM averaging and HRV (RMSSD)
 
@@ -218,6 +223,9 @@ struct HeartChannel
         return (uint16_t)sqrt((double)sumSquaredDiff / (intervalCount - 1));
     }
 
+    // BPM/HRV bookkeeping only -- felt/visual feedback is triggered
+    // separately (see process()) so a statistically-implausible interval
+    // doesn't also suppress the tactile pulse for a perfectly real beat.
     void recordBeat(unsigned long interval)
     {
         intervals[intervalIndex] = interval;
@@ -231,8 +239,6 @@ struct HeartChannel
         bpm = 60000UL / (sum / intervalCount);
 
         hrv = computeRMSSD();
-        beatFlashUntil = millis() + 120;
-        motorTriggerTime = millis();
     }
 
     // Linear ramp up over MOTOR_ATTACK_MS, then linear ramp down over
@@ -334,6 +340,14 @@ struct HeartChannel
                         recordBeat(interval);
                 }
                 lastBeatTime = sampleTime;
+
+                // Felt/visual feedback on every real detected peak, even if
+                // its interval got rejected above for BPM/HRV purposes --
+                // an implausible interval doesn't mean the peak was fake,
+                // and a suppressed motor pulse reads as "sometimes nothing
+                // happens" even though the sensor saw a real beat.
+                beatFlashUntil = millis() + 120;
+                motorTriggerTime = millis();
             }
 
             updateSpO2();
@@ -341,6 +355,9 @@ struct HeartChannel
             long nextThreshold = positivePeak / 2;
             if (nextThreshold < MIN_THRESHOLD_FLOOR)
                 nextThreshold = MIN_THRESHOLD_FLOOR;
+            long maxNextThreshold = threshold * THRESHOLD_MAX_STEP_RATIO;
+            if (nextThreshold > maxNextThreshold)
+                nextThreshold = maxNextThreshold;
             threshold = (threshold * 3 + nextThreshold) / 4;
             positivePeak = 0;
             redPositivePeak = 0;

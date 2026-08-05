@@ -166,9 +166,12 @@ Each strip is independent; strip 1 = participant 1's heartrate, strip 2 = partic
    - Validate the displayed BPM against a manually counted pulse before treating it as ready for the installation.
 
 2. **Motor modulation** — implemented. Each detected beat triggers a non-blocking linear
-   ramp up/down (`HeartChannel::motorIntensity()`), driven via `analogWrite` on D6/D13
-   with IN2 hardwired to GND. Peak intensity is a fixed constant for now; potentiometer
-   control is not wired in yet.
+   ramp up/down (`HeartChannel::motorIntensity()`), driven via `analogWrite`, cross-paired
+   D8/D9 sensor → D13 motor and SDA/SCL sensor → D6 motor (IN2 hardwired to GND on both
+   drivers — see pin assignments). Peak intensity is a fixed constant for now; potentiometer
+   control is not wired in yet. Motor triggering is decoupled from the BPM interval
+   plausibility check — it fires on every detected peak (`positivePeak > threshold`), not
+   only on peaks whose timing also passed the BPM-specific interval bounds.
 
 3. **LED coherence logic** — async dual-strip, brightness pulse on beat, sync logic when
    BPM delta ≤ 5–10.
@@ -195,6 +198,13 @@ Each strip is independent; strip 1 = participant 1's heartrate, strip 2 = partic
   loop). `getOverflowCount()` is kept for manual/debug inspection only — do not wire it
   back into automatic control flow without confirming the real clear mechanism against the
   datasheet first.
+- Occasional single-sample amplitude outliers (motion artifact or a bad I2C read) can spike
+  `positivePeak` well above the real signal. Since the adaptive threshold's target is
+  `positivePeak / 2`, an unclamped outlier inflates `threshold` several times over in one
+  step and then suppresses real, normal-amplitude beats for several seconds while the 75/25
+  blend decays it back down — this was the cause of inconsistent motor pulsing. Confirmed
+  via live serial capture (temporary per-cycle counters) before fixing.
+  `THRESHOLD_MAX_STEP_RATIO` caps how far a single cycle can move the threshold target.
 
 ---
 

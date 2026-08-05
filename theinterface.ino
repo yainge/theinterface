@@ -18,11 +18,11 @@ const uint8_t BEAT_R = 220;
 const uint8_t BEAT_G = 60;
 const uint8_t BEAT_B = 0;
 
-const uint8_t LED_AMBIENT_FLOOR = 8;   // minimum per-pixel brightness between beats
-const uint8_t LED_SPARKLE_PEAK = 120;  // peak brightness when a new sparkle fires
+const uint8_t LED_AMBIENT_FLOOR = 3;   // minimum per-pixel brightness between beats
+const uint8_t LED_SPARKLE_PEAK = 60;   // peak brightness when a new sparkle fires
 const uint8_t NUM_SPARKLES = 6;        // independent twinkling points per strip
-const uint8_t LED_BEAT_DECAY = 12;     // beat pulse fades by this per 20 ms frame (~420 ms total)
-const uint8_t LED_PIXEL_DECAY = 3;     // per-pixel ambient brightness decay per frame
+const uint8_t LED_BEAT_DECAY = 8;      // beat pulse fades by this per 20 ms frame (~640 ms total)
+const uint8_t LED_PIXEL_DECAY = 4;     // per-pixel ambient brightness decay per frame
 const uint16_t LED_UPDATE_MS = 20;     // 50 fps
 
 // Motor driver wiring is cross-paired with sensor wiring, not matched by
@@ -33,7 +33,7 @@ const uint16_t LED_UPDATE_MS = 20;     // 50 fps
 const uint8_t MOTOR_PIN_D6 = 6;
 const uint8_t MOTOR_PIN_D13 = 13;
 
-const long CONTACT_DETECTED_IR = 6000;
+const long CONTACT_DETECTED_IR = 30000;
 const long GAIN_TARGET_LOW = 90000;
 const long GAIN_TARGET_HIGH = 225000;
 const byte INITIAL_LED_CURRENT = 0x30;
@@ -500,11 +500,14 @@ struct LedState
     }
 
     // Call once per loop() — detects a newly set beatFlashUntil and arms the pulse.
+    // On beat: flood all pixels to full brightness so the flash is impossible to miss.
     void checkBeat(unsigned long beatFlashUntil)
     {
         if (beatFlashUntil != lastBeatFlash && beatFlashUntil > millis())
         {
             beatPulse = 255;
+            for (uint8_t i = 0; i < LED_COUNT; i++)
+                pxBright[i] = 255;
             lastBeatFlash = beatFlashUntil;
         }
     }
@@ -530,18 +533,22 @@ struct LedState
                 pxBright[i] = LED_AMBIENT_FLOOR;
         }
 
-        // Advance sparkles: when a timer expires, light a new random pixel
-        for (uint8_t i = 0; i < NUM_SPARKLES; i++)
+        // Advance sparkles only when the beat pulse has fully faded — keeps the
+        // flash clean (no new sparkles popping during the bright decay window).
+        if (beatPulse == 0)
         {
-            if (sparkleTimer[i] == 0)
+            for (uint8_t i = 0; i < NUM_SPARKLES; i++)
             {
-                sparklePos[i] = random(LED_COUNT);
-                pxBright[sparklePos[i]] = random(LED_SPARKLE_PEAK / 2, LED_SPARKLE_PEAK);
-                sparkleTimer[i] = random(15, 50);
-            }
-            else
-            {
-                sparkleTimer[i]--;
+                if (sparkleTimer[i] == 0)
+                {
+                    sparklePos[i] = random(LED_COUNT);
+                    pxBright[sparklePos[i]] = random(LED_SPARKLE_PEAK / 2, LED_SPARKLE_PEAK);
+                    sparkleTimer[i] = random(15, 50);
+                }
+                else
+                {
+                    sparkleTimer[i]--;
+                }
             }
         }
 

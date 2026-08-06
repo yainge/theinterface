@@ -1,0 +1,1825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LED 3D Map — The Interface</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0d0d; color: #ccc; font-family: monospace; padding: 24px; }
+  h1 { font-size: 14px; color: #888; margin-bottom: 4px; letter-spacing: 2px; text-transform: uppercase; }
+  p.sub { font-size: 11px; color: #555; margin-bottom: 20px; }
+
+  #canvas-wrap { background: #111; border: 1px solid #222; border-radius: 8px; padding: 8px; margin-bottom: 20px; position: relative; }
+  canvas { display: block; width: 100%; height: 520px; border-radius: 4px; cursor: grab; touch-action: none; }
+  canvas.dragging { cursor: grabbing; }
+  #hint { position: absolute; top: 20px; left: 20px; font-size: 11px; color: #555; pointer-events: none; }
+  #status { font-size: 11px; color: #555; padding: 8px 8px 0; }
+  #status b { color: #e63c00; }
+
+  .panel { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+  .card { background: #161616; border: 1px solid #222; border-radius: 6px; padding: 16px; min-width: 210px; }
+  .card h2 { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+  .row label { font-size: 12px; color: #999; white-space: nowrap; }
+  .row input[type=range] { flex: 1; accent-color: #e63c00; }
+  .row span { font-size: 12px; color: #e63c00; width: 36px; text-align: right; }
+  .row input[type=color] { width: 40px; height: 26px; border: none; background: none; cursor: pointer; }
+  .row input[type=checkbox] { accent-color: #e63c00; width: 16px; height: 16px; }
+
+  .btn { padding: 10px 16px; border: none; border-radius: 4px; font-family: monospace; font-size: 13px; cursor: pointer; }
+  .btn-beat1 { background: #e63c00; color: #fff; }
+  .btn-beat1:hover { background: #ff5500; }
+  .btn-beat2 { background: #0090c0; color: #fff; }
+  .btn-beat2:hover { background: #00b0ea; }
+  .btn-toggle { background: #222; color: #ccc; border: 1px solid #333; }
+  .btn-toggle.active { background: #2d5a2d; color: #8bc34a; border-color: #3d7a3d; }
+  .btn-step { padding: 4px 10px; font-size: 14px; line-height: 1.2; flex: 0 0 auto; }
+
+  .strip-row { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+
+  #note { font-size: 11px; color: #555; line-height: 1.6; max-width: 900px; }
+  #note b { color: #888; }
+</style>
+</head>
+<body>
+
+<h1>The Interface — LED 3D Map (2 strips spiraling together)</h1>
+<p class="sub">Coil geometry preview of ten LED patterns. Both participants' strips wind around one shared coil axis, evenly spaced apart — a literal double helix.</p>
+
+<div id="canvas-wrap">
+  <canvas id="scene"></canvas>
+  <div id="hint">Drag to orbit · Scroll to zoom</div>
+  <div id="status">
+    Pattern: <b id="pat-name">Red-Blue</b> &nbsp;|&nbsp;
+    Strip 1 beat pulse: <b id="pulse1-val">0</b> &nbsp;|&nbsp;
+    Strip 2 beat pulse: <b id="pulse2-val">0</b>
+  </div>
+</div>
+
+<div class="panel">
+
+  <div class="card">
+    <h2>Pattern</h2>
+    <div class="strip-row">
+      <button class="btn btn-toggle pattern-btn active" data-pattern="0" onclick="setPattern(0)">Red-Blue</button>
+      <button class="btn btn-toggle pattern-btn" data-pattern="1" onclick="setPattern(1)">Chase</button>
+      <button class="btn btn-toggle pattern-btn" data-pattern="2" onclick="setPattern(2)">Rainbow Wave</button>
+      <button class="btn btn-toggle pattern-btn" data-pattern="3" onclick="setPattern(3)">Lava</button>
+      <button class="btn btn-toggle pattern-btn" data-pattern="4" onclick="setPattern(4)">Eclipse</button>
+      <button class="btn btn-toggle pattern-btn" data-pattern="5" onclick="setPattern(5)">Rings</button>
+      <button class="btn btn-toggle pattern-btn" data-pattern="6" onclick="setPattern(6)">Plant</button>
+      <button class="btn btn-toggle pattern-btn" data-pattern="7" onclick="setPattern(7)">Slow Rainbow</button>
+      <button class="btn btn-toggle pattern-btn" data-pattern="8" onclick="setPattern(8)">Sparkle</button>
+      <button class="btn btn-toggle pattern-btn" data-pattern="9" onclick="setPattern(9)">Aurora</button>
+    </div>
+    <button class="btn btn-toggle" style="width:100%" onclick="cyclePattern()">Next Pattern &#9654;</button>
+  </div>
+
+  <div class="card">
+    <h2>Coil geometry</h2>
+    <div class="row">
+      <label>Turns</label>
+      <input type="range" min="1" max="8" step="0.5" value="2" id="turns-slider" oninput="onGeomChange(this,'turns-val')">
+      <span id="turns-val">2</span>
+    </div>
+    <div class="row">
+      <label>Radius</label>
+      <input type="range" min="20" max="140" value="70" id="radius-slider" oninput="onGeomChange(this,'radius-val')">
+      <span id="radius-val">70</span>
+    </div>
+    <div class="row">
+      <label>Height</label>
+      <input type="range" min="120" max="480" value="320" id="height-slider" oninput="onGeomChange(this,'height-val')">
+      <span id="height-val">320</span>
+    </div>
+    <div class="row">
+      <label>Show index labels</label>
+      <input type="checkbox" id="labels-toggle" checked>
+    </div>
+    <div class="row">
+      <label>Double helix (2 spirals/pair)</label>
+      <input type="checkbox" id="helix-toggle" checked>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>View</h2>
+    <div class="row">
+      <label>Auto-rotate</label>
+      <input type="checkbox" id="autorotate-toggle" checked>
+    </div>
+    <div class="row">
+      <label>Rotate speed</label>
+      <input type="range" min="0" max="15" value="4" id="rotspeed-slider" oninput="document.getElementById('rotspeed-val').textContent=this.value">
+      <span id="rotspeed-val">4</span>
+    </div>
+    <button class="btn btn-toggle" style="width:100%" onclick="resetView()">Reset view</button>
+  </div>
+
+  <div class="card">
+    <h2>Trigger</h2>
+    <div class="strip-row">
+      <button class="btn btn-beat1" onclick="triggerBeat(led1)">&#9829; Beat 1</button>
+      <button class="btn btn-beat2" onclick="triggerBeat(led2)">&#9829; Beat 2</button>
+    </div>
+    <div class="strip-row">
+      <button class="btn btn-toggle" id="bpm1-toggle" onclick="toggleAutoBPM(1)">Auto BPM 1</button>
+      <button class="btn btn-toggle" id="bpm2-toggle" onclick="toggleAutoBPM(2)">Auto BPM 2</button>
+    </div>
+    <div class="row">
+      <label>BPM 1</label>
+      <button class="btn btn-toggle btn-step" onclick="adjustBpm(1,-1)">&minus;</button>
+      <input type="range" min="40" max="120" value="70" id="bpm1-slider" oninput="bpm1=+this.value; document.getElementById('bpm1-val').textContent=this.value">
+      <button class="btn btn-toggle btn-step" onclick="adjustBpm(1,1)">+</button>
+      <span id="bpm1-val">70</span>
+    </div>
+    <div class="row">
+      <label>BPM 2</label>
+      <button class="btn btn-toggle btn-step" onclick="adjustBpm(2,-1)">&minus;</button>
+      <input type="range" min="40" max="120" value="76" id="bpm2-slider" oninput="bpm2=+this.value; document.getElementById('bpm2-val').textContent=this.value">
+      <button class="btn btn-toggle btn-step" onclick="adjustBpm(2,1)">+</button>
+      <span id="bpm2-val">76</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Color &amp; tuning</h2>
+    <div class="row">
+      <label>LED color 1</label>
+      <input type="color" id="beat-color1" value="#dc3c00" oninput="updateColor()">
+    </div>
+    <div class="row">
+      <label>LED color 2</label>
+      <input type="color" id="beat-color2" value="#0090c0" oninput="updateColor()">
+    </div>
+    <div class="row">
+      <label>Beat decay</label>
+      <input type="range" min="1" max="30" value="8" id="decay-slider" oninput="LED_BEAT_DECAY=+this.value; document.getElementById('decay-val').textContent=this.value">
+      <span id="decay-val">8</span>
+    </div>
+    <div class="row">
+      <label>Ambient floor</label>
+      <input type="range" min="0" max="40" value="3" id="floor-slider" oninput="LED_AMBIENT_FLOOR=+this.value; document.getElementById('floor-val').textContent=this.value">
+      <span id="floor-val">3</span>
+    </div>
+    <div class="row">
+      <label>Sparkle peak</label>
+      <input type="range" min="10" max="200" value="60" id="sparkle-slider" oninput="LED_SPARKLE_PEAK=+this.value; document.getElementById('sparkle-val').textContent=this.value">
+      <span id="sparkle-val">60</span>
+    </div>
+    <div class="row">
+      <label>Beat sparkles</label>
+      <input type="range" min="1" max="44" value="14" id="sparkle-beat-slider" oninput="SPARKLE_BEAT_COUNT=+this.value; document.getElementById('sparkle-beat-val').textContent=this.value">
+      <span id="sparkle-beat-val">14</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Rainbow Wave tuning</h2>
+    <div class="row">
+      <label>Full-strip travel (ms)</label>
+      <input type="range" min="300" max="2400" value="900" id="rwave-travel-slider" oninput="WAVE_TRAVEL_MS=+this.value; document.getElementById('rwave-travel-val').textContent=this.value">
+      <span id="rwave-travel-val">900</span>
+    </div>
+    <div class="row">
+      <label>Tail length</label>
+      <input type="range" min="2" max="22" value="10" id="rwave-tail-slider" oninput="WAVE_TAIL_LEN=+this.value; document.getElementById('rwave-tail-val').textContent=this.value">
+      <span id="rwave-tail-val">10</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Lava tuning</h2>
+    <div class="row">
+      <label>Flow update (ms)</label>
+      <input type="range" min="20" max="400" value="90" id="lava-speed-slider" oninput="LAVA_UPDATE_MS=+this.value; document.getElementById('lava-speed-val').textContent=this.value">
+      <span id="lava-speed-val">90</span>
+    </div>
+    <div class="row">
+      <label>Cooling</label>
+      <input type="range" min="10" max="120" value="120" id="lava-cooling-slider" oninput="LAVA_COOLING=+this.value; document.getElementById('lava-cooling-val').textContent=this.value">
+      <span id="lava-cooling-val">120</span>
+    </div>
+    <div class="row">
+      <label>Sparking</label>
+      <input type="range" min="0" max="200" value="50" id="lava-sparking-slider" oninput="LAVA_SPARKING=+this.value; document.getElementById('lava-sparking-val').textContent=this.value">
+      <span id="lava-sparking-val">50</span>
+    </div>
+    <div class="row">
+      <label>Beat burst</label>
+      <input type="range" min="1" max="10" value="4" id="lava-burst-slider" oninput="LAVA_BEAT_BURST=+this.value; document.getElementById('lava-burst-val').textContent=this.value">
+      <span id="lava-burst-val">4</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Eclipse tuning</h2>
+    <div class="row">
+      <label>Travel time (ms)</label>
+      <input type="range" min="500" max="3000" value="1750" id="eclipse-travel-slider" oninput="ECLIPSE_TRAVEL_MS=+this.value; document.getElementById('eclipse-travel-val').textContent=this.value">
+      <span id="eclipse-travel-val">1750</span>
+    </div>
+    <div class="row">
+      <label>Umbra radius</label>
+      <input type="range" min="1" max="10" value="6" id="eclipse-umbra-slider" oninput="ECLIPSE_UMBRA_RADIUS=+this.value; document.getElementById('eclipse-umbra-val').textContent=this.value">
+      <span id="eclipse-umbra-val">6</span>
+    </div>
+    <div class="row">
+      <label>Corona width</label>
+      <input type="range" min="1" max="8" value="4" id="eclipse-corona-slider" oninput="ECLIPSE_CORONA_WIDTH=+this.value; document.getElementById('eclipse-corona-val').textContent=this.value">
+      <span id="eclipse-corona-val">4</span>
+    </div>
+    <div class="row">
+      <label>Sync threshold (BPM)</label>
+      <input type="range" min="1" max="30" value="4" id="eclipse-sync-slider" oninput="ECLIPSE_SYNC_THRESHOLD=+this.value; document.getElementById('eclipse-sync-val').textContent=this.value">
+      <span id="eclipse-sync-val">4</span>
+    </div>
+    <div class="row">
+      <label>Sync color transition (ms)</label>
+      <input type="range" min="500" max="8000" value="3000" id="eclipse-sync-color-slider" oninput="ECLIPSE_SYNC_COLOR_MS=+this.value; document.getElementById('eclipse-sync-color-val').textContent=this.value">
+      <span id="eclipse-sync-color-val">3000</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Rings tuning</h2>
+    <div class="row">
+      <label>Travel time (ms)</label>
+      <input type="range" min="200" max="2000" value="700" id="rings-travel-slider" oninput="RING_TRAVEL_MS=+this.value; document.getElementById('rings-travel-val').textContent=this.value">
+      <span id="rings-travel-val">700</span>
+    </div>
+    <div class="row">
+      <label>Ring width</label>
+      <input type="range" min="1" max="15" value="6" id="rings-width-slider" oninput="RING_WIDTH=+this.value; document.getElementById('rings-width-val').textContent=this.value">
+      <span id="rings-width-val">6</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Plant tuning</h2>
+    <div class="row">
+      <label>Mature brightness</label>
+      <input type="range" min="60" max="255" value="150" id="plant-mature-slider" oninput="PLANT_MATURE_BRIGHTNESS=+this.value; document.getElementById('plant-mature-val').textContent=this.value">
+      <span id="plant-mature-val">150</span>
+    </div>
+    <div class="row">
+      <label>Shimmer decay</label>
+      <input type="range" min="1" max="20" value="6" id="plant-decay-slider" oninput="PLANT_DECAY=+this.value; document.getElementById('plant-decay-val').textContent=this.value">
+      <span id="plant-decay-val">6</span>
+    </div>
+    <div class="row">
+      <label>Aging decay</label>
+      <input type="range" min="0.02" max="1" step="0.02" value="0.1" id="plant-age-decay-slider" oninput="PLANT_AGE_DECAY=+this.value; document.getElementById('plant-age-decay-val').textContent=this.value">
+      <span id="plant-age-decay-val">0.1</span>
+    </div>
+    <div class="row">
+      <label>Aged floor</label>
+      <input type="range" min="0" max="100" value="25" id="plant-aged-floor-slider" oninput="PLANT_AGED_FLOOR=+this.value; document.getElementById('plant-aged-floor-val').textContent=this.value">
+      <span id="plant-aged-floor-val">25</span>
+    </div>
+    <div class="row">
+      <label>Sync threshold (BPM)</label>
+      <input type="range" min="1" max="30" value="4" id="plant-sync-slider" oninput="PLANT_SYNC_THRESHOLD=+this.value; document.getElementById('plant-sync-val').textContent=this.value">
+      <span id="plant-sync-val">4</span>
+    </div>
+    <div class="row">
+      <label>Flower count</label>
+      <input type="range" min="1" max="8" value="1" id="plant-flower-count-slider" oninput="PLANT_FLOWER_COUNT=+this.value; document.getElementById('plant-flower-count-val').textContent=this.value">
+      <span id="plant-flower-count-val">1</span>
+    </div>
+    <div class="row">
+      <label>Flower fade-in (ms)</label>
+      <input type="range" min="50" max="1500" value="300" id="plant-flower-fadein-slider" oninput="FLOWER_FADE_IN_MS=+this.value; document.getElementById('plant-flower-fadein-val').textContent=this.value">
+      <span id="plant-flower-fadein-val">300</span>
+    </div>
+    <div class="row">
+      <label>Flower hold (ms)</label>
+      <input type="range" min="0" max="3000" value="600" id="plant-flower-hold-slider" oninput="FLOWER_HOLD_MS=+this.value; document.getElementById('plant-flower-hold-val').textContent=this.value">
+      <span id="plant-flower-hold-val">600</span>
+    </div>
+    <div class="row">
+      <label>Flower fade-out (ms)</label>
+      <input type="range" min="100" max="3000" value="900" id="plant-flower-fadeout-slider" oninput="FLOWER_FADE_OUT_MS=+this.value; document.getElementById('plant-flower-fadeout-val').textContent=this.value">
+      <span id="plant-flower-fadeout-val">900</span>
+    </div>
+    <div class="row">
+      <label>Fade-out (ms)</label>
+      <input type="range" min="300" max="5000" value="2000" id="plant-fadeout-slider" oninput="PLANT_FADEOUT_MS=+this.value; document.getElementById('plant-fadeout-val').textContent=this.value">
+      <span id="plant-fadeout-val">2000</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Slow Rainbow tuning</h2>
+    <div class="row">
+      <label>Hue speed (deg/sec)</label>
+      <input type="range" min="1" max="60" value="20" id="slowrainbow-speed-slider" oninput="SLOW_RAINBOW_HUE_SPEED=+this.value; document.getElementById('slowrainbow-speed-val').textContent=this.value">
+      <span id="slowrainbow-speed-val">20</span>
+    </div>
+    <div class="row">
+      <label>Reference BPM</label>
+      <input type="range" min="40" max="120" value="70" id="slowrainbow-refbpm-slider" oninput="SLOW_RAINBOW_REFERENCE_BPM=+this.value; document.getElementById('slowrainbow-refbpm-val').textContent=this.value">
+      <span id="slowrainbow-refbpm-val">70</span>
+    </div>
+    <div class="row">
+      <label>Fade period (ms)</label>
+      <input type="range" min="1000" max="20000" step="500" value="6000" id="slowrainbow-fade-slider" oninput="SLOW_RAINBOW_FADE_MS=+this.value; document.getElementById('slowrainbow-fade-val').textContent=this.value">
+      <span id="slowrainbow-fade-val">6000</span>
+    </div>
+    <div class="row">
+      <label>Min brightness</label>
+      <input type="range" min="0" max="150" value="20" id="slowrainbow-min-slider" oninput="SLOW_RAINBOW_MIN_BRIGHTNESS=+this.value; document.getElementById('slowrainbow-min-val').textContent=this.value">
+      <span id="slowrainbow-min-val">20</span>
+    </div>
+    <div class="row">
+      <label>Max brightness</label>
+      <input type="range" min="100" max="255" value="180" id="slowrainbow-max-slider" oninput="SLOW_RAINBOW_MAX_BRIGHTNESS=+this.value; document.getElementById('slowrainbow-max-val').textContent=this.value">
+      <span id="slowrainbow-max-val">180</span>
+    </div>
+    <div class="row">
+      <label>Beat kick (deg/sec)</label>
+      <input type="range" min="0" max="400" value="150" id="slowrainbow-kick-slider" oninput="SLOW_RAINBOW_BEAT_KICK=+this.value; document.getElementById('slowrainbow-kick-val').textContent=this.value">
+      <span id="slowrainbow-kick-val">150</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Sparkle tuning</h2>
+    <div class="row">
+      <label>Twinkle peak</label>
+      <input type="range" min="10" max="255" value="80" id="twinkle-peak-slider" oninput="TWINKLE_PEAK=+this.value; document.getElementById('twinkle-peak-val').textContent=this.value">
+      <span id="twinkle-peak-val">80</span>
+    </div>
+    <div class="row">
+      <label>Reference BPM</label>
+      <input type="range" min="40" max="120" value="70" id="twinkle-refbpm-slider" oninput="TWINKLE_REFERENCE_BPM=+this.value; document.getElementById('twinkle-refbpm-val').textContent=this.value">
+      <span id="twinkle-refbpm-val">70</span>
+    </div>
+    <div class="row">
+      <label>Min interval (frames)</label>
+      <input type="range" min="2" max="40" value="15" id="twinkle-mininterval-slider" oninput="TWINKLE_MIN_INTERVAL=+this.value; document.getElementById('twinkle-mininterval-val').textContent=this.value">
+      <span id="twinkle-mininterval-val">15</span>
+    </div>
+    <div class="row">
+      <label>Max interval (frames)</label>
+      <input type="range" min="10" max="100" value="50" id="twinkle-maxinterval-slider" oninput="TWINKLE_MAX_INTERVAL=+this.value; document.getElementById('twinkle-maxinterval-val').textContent=this.value">
+      <span id="twinkle-maxinterval-val">50</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Aurora tuning</h2>
+    <div class="row">
+      <label>Wave speed</label>
+      <input type="range" min="0.05" max="1.5" step="0.05" value="0.3" id="aurora-speed-slider" oninput="AURORA_WAVE_SPEED=+this.value; document.getElementById('aurora-speed-val').textContent=this.value">
+      <span id="aurora-speed-val">0.3</span>
+    </div>
+    <div class="row">
+      <label>Base brightness</label>
+      <input type="range" min="0" max="100" value="40" id="aurora-base-slider" oninput="AURORA_BASE_BRIGHTNESS=+this.value; document.getElementById('aurora-base-val').textContent=this.value">
+      <span id="aurora-base-val">40</span>
+    </div>
+    <div class="row">
+      <label>Intensity reference BPM</label>
+      <input type="range" min="40" max="120" value="70" id="aurora-refbpm-slider" oninput="AURORA_INTENSITY_REFERENCE_BPM=+this.value; document.getElementById('aurora-refbpm-val').textContent=this.value">
+      <span id="aurora-refbpm-val">70</span>
+    </div>
+    <div class="row">
+      <label>Sync threshold (BPM)</label>
+      <input type="range" min="1" max="30" value="4" id="aurora-sync-slider" oninput="AURORA_SYNC_THRESHOLD=+this.value; document.getElementById('aurora-sync-val').textContent=this.value">
+      <span id="aurora-sync-val">4</span>
+    </div>
+    <div class="row">
+      <label>Sync color transition (ms)</label>
+      <input type="range" min="500" max="8000" value="3000" id="aurora-sync-color-slider" oninput="AURORA_SYNC_COLOR_MS=+this.value; document.getElementById('aurora-sync-color-val').textContent=this.value">
+      <span id="aurora-sync-color-val">3000</span>
+    </div>
+  </div>
+
+</div>
+
+<p id="note">
+  <b>What this is:</b> both 44-LED strips wound around one shared coil axis instead of sitting in two
+  separate coils side by side — a literal double helix, previewing ten LED patterns on the real physical
+  mounting shape rather than a flat line. <i>Red-Blue</i> is the only pattern actually implemented in
+  <code>theinterface.ino</code>'s <code>LedState</code> today -- it's the sketch's Sparkle Twinkle mechanic,
+  just renamed here now that a second, differently-themed twinkle pattern (<i>Sparkle</i>, see below) also
+  exists. <i>Chase</i>, <i>Rainbow Wave</i>, <i>Lava</i>, <i>Eclipse</i>, <i>Rings</i>, <i>Plant</i>,
+  <i>Slow Rainbow</i>, <i>Sparkle</i>, and <i>Aurora</i> are design previews, not yet wired into the sketch.
+  <i>Lava</i> is a
+  heat-diffusion simulation (cool every LED a little at random, then blend each LED toward the one behind it
+  so heat drifts along the strip, colored through a fixed black → red → orange → yellow → white palette)
+  rather than a moving light -- each beat pumps a fresh burst of heat in at index 0 (<b>Beat burst</b>),
+  which then flows and cools down the strip like magma, while <b>Sparking</b> keeps a low ambient ember going
+  between beats so it's never fully dark, <b>Cooling</b> controls how far the flow travels before it dies
+  out, and <b>Flow update</b> throttles how often the heat itself actually changes (independent of the 50fps
+  render loop) so the flow reads as slow-moving lava rather than a fast flicker.
+  <i>Eclipse</i> runs opposite to every other pattern here: the strip idles at full brightness (a cloudy,
+  foggy blue "sun," not a warm one) instead of a dim ambient floor, and each beat is a dimming
+  event rather than a brightening one -- a shadow disc whose center sweeps completely through the strip,
+  index 0 all the way to index LED_COUNT-1, over <b>Travel time</b>, plunging the LEDs it passes over into
+  pure black (<b>Umbra radius</b>) with a pure white ring (<b>Corona width</b>) flashing at the shadow's
+  leading and trailing edge, mimicking the diamond-ring effect at 2nd/3rd contact of a real solar eclipse.
+  That blue itself isn't fixed, though: whenever the two hearts are in sync -- BPM 1 and BPM 2 within
+  <b>Sync threshold</b> of each other, same concept as Plant's flower sync -- the sun slowly shifts to a warm
+  orange-yellow over <b>Sync color transition</b>, then eases back to blue over the same duration once they
+  drift back out of sync. Unlike the shadow (independent per strip, on each participant's own beat timing),
+  this color shift is shared: it's a property of both hearts together, so both strips' suns shift in lockstep
+  rather than each tracking its own sync status.
+  <i>Rings</i> sends one ring of light out from the direction of index 0 on each respective heartbeat, its
+  front sweeping through to index LED_COUNT-1 over <b>Travel time</b> -- unlike Rainbow Wave/Lava's one-sided
+  trailing tail, a ring is a symmetric band (<b>Ring width</b>) centered on its front that fades out on both
+  its leading and trailing edge, the way a ripple would, rather than towing a tail behind it, and it's a
+  fixed pure white on both strips regardless of participant color.
+  <i>Plant</i> is the one pattern where growth is <i>cumulative</i> across beats instead of a transient event
+  that fades back to ambient: each heartbeat adds one grown green LED, starting from index 0 (the "roots")
+  and reaching toward LED_COUNT-1 one beat at a time, rather than firing a pulse. Each freshly-grown LED
+  starts at a bright shimmer and settles down to <b>Mature brightness</b> over <b>Shimmer decay</b> --
+  brightness doesn't stop there, though: it then keeps fading, slowly and continuously, at <b>Aging
+  decay</b> per frame down to a dim <b>Aged floor</b> that it never fully drops below. Since color here is
+  brightness applied to a hue (not a separate light-over-color layer), dimming <i>is</i> darkening -- the
+  longer ago a leaf was grown, the darker green it reads, with the roots (grown first) visibly darker than
+  the newest growth at the tip by the time a plant finishes growing. Each leaf also picks its own random
+  shade within a yellow-green-to-teal-green range so the stem looks like individual leaves rather than one
+  flat green. Whenever the two hearts are in sync -- BPM 1 and BPM 2 within <b>Sync threshold</b> of each
+  other (default 4 BPM, tighter than DESIGN.md's ~5-10 BPM figure for the real near-sync behavior) -- each
+  beat also blooms
+  <b>Flower count</b> violet flowers at random points along whatever's already grown, excluding the growth
+  tip itself (still busy with its own fresh-growth shimmer). Each bloom fades in over <b>Flower fade-in</b>,
+  holds at full brightness for <b>Flower hold</b>, then eases back out over <b>Flower fade-out</b> -- a
+  temporary tint over the green rather than a permanent recolor, so the stem's own growth/aging keeps going
+  underneath. Once every LED is grown, rather than the next beat cutting the whole strip back to
+  ambient in one abrupt step, the strip eases down to black together over <b>Fade-out</b> -- from wherever
+  each LED's brightness actually was when it finished growing, not a fixed reset -- before a fresh plant
+  starts growing from index 0 again.
+  <i>Slow Rainbow</i> is the one pattern that isn't beat-triggered at all: a continuously flowing rainbow
+  gradient across the whole strip (each LED's hue offset from a shared phase by its position) with a slow
+  brightness "breathing" cycle (<b>Fade period</b>, between <b>Min brightness</b> and <b>Max brightness</b>)
+  that runs whether or not any beats are firing. <b>Hue speed</b> is how fast the colors drift at
+  <b>Reference BPM</b> -- the actual speed scales with the live average of BPM 1 and BPM 2, so both hearts
+  moving faster together visibly speeds up how quickly the colors move, and slower hearts drift more
+  languidly; that speed is shared across both strips (like Eclipse's sync color) since it's a property of
+  both participants together, not either one alone. Heartbeats don't flash brightness here like they do
+  almost everywhere else in this file -- instead, each beat gives the drifting colors a brief extra push
+  (<b>Beat kick</b>), reusing the same beatPulse timer every pattern gets from <code>triggerBeat()</code> as
+  the kick's own decay curve, so a beat reads as the rainbow's colors visibly jumping/sliding forward for a
+  moment rather than the strip flashing, easing back to the normal BPM-driven pace as beatPulse decays. It's
+  still ambient mood lighting that never stops or resets for a beat, just one where the heartbeat moves the
+  colors instead of the brightness.
+  <i>Sparkle</i> is a second, differently-themed twinkle alongside Red-Blue: warm yellow-gold
+  (<b>Twinkle peak</b>) instead of red/blue, and not themed per strip -- both strips share the same hue
+  range. Unlike every twinkle-family pattern here, it has no beat-triggered burst at all; instead each
+  strip's ambient pop <i>rate</i> is what responds to heart rate, scaling <b>Min interval</b>/<b>Max
+  interval</b> (in frames, at <b>Reference BPM</b>) by that strip's own current BPM -- a faster heart makes
+  its own strip twinkle faster, a slower one twinkles more languidly, independently per participant rather
+  than a shared/combined value like Eclipse or Slow Rainbow use.
+  <i>Aurora</i> mimics the aurora borealis as an organic, continuously animated "curtain" of light -- three
+  overlapping sine waves at different spatial frequencies and phase speeds (<b>Wave speed</b>) combine so
+  the bright bands and gaps between them never look like one clean repeating wave, and only the combined
+  waves' positive lobes glow (<b>Base brightness</b> is the floor in the gaps between bands). Green-to-teal
+  dominates, the most common real aurora color, but position along the strip layers in the other colors real
+  auroras show at their fringes: index 0 (the bottom, same convention Plant uses) shifts to blue and purple
+  over roughly the lowest third of the strip, and the very top shifts to a red fringe over roughly the top
+  15% -- rarer and higher-altitude in a real aurora, so it only gets a small stretch of LEDs here, not a
+  washed-out tint everywhere. Like Sparkle, each strip's own current BPM independently scales *its own*
+  curtain's intensity (<b>Intensity reference BPM</b>) -- a faster heart brightens its aurora, a slower one
+  dims it. On top of all that, whenever the two hearts are in sync (<b>Sync threshold</b>, same concept as
+  Plant/Eclipse) a rare magenta-pink shimmer -- real auroras do show pink/red during intense geomagnetic
+  activity -- fades in over <b>Sync color transition</b> wherever the curtain is already brightest, and
+  eases back to the ordinary coloring once they drift apart; that shimmer is shared across both strips, a
+  property of both hearts together rather than either one alone.
+  The selected pattern applies to both participants at once; each still runs its own
+  independent beat timing, sparkle positions, wave state, heat array, eclipse state, ring state, plant
+  growth/flowers/fade-out, rainbow phase/breathing, twinkle state, and aurora phase/intensity, same as the
+  two real <code>HeartChannel</code>s.
+  Only <i>Chase</i> (plain, fixed red on both
+  strips) still reads <b>LED color 1 / LED color 2</b> to tell participants apart by color; every other
+  pattern owns its own fixed color treatment instead (red-to-orange &amp; blue-to-purple themes / hue sweep /
+  heat palette / cloudy blue / pure white / leafy greens / warm yellow-gold / green-blue-purple-red aurora),
+  same as the real
+  <code>BEAT_R</code>/<code>BEAT_G</code>/<code>BEAT_B</code> constants are a single shared color in
+  <code>theinterface.ino</code> today. Sparkle stays tellable apart by <i>theme</i> rather than one flat
+  color: Strip 1 sparkles are a constantly changing random assortment of red-to-orange, Strip 2 a changing
+  assortment of blue-to-purple -- each lit LED (ambient twinkle or beat sparkle) rolls its own random hue
+  within its strip's range every time it's freshly lit, rather than all sharing one color.
+  Rainbow Wave moves the same direction on both -- index 0 to index LED_COUNT-1 -- and unlike Eclipse's
+  shadow, multiple waves can be traveling at once: every beat launches its own, so beats landing close
+  together (fast BPM, or the two participants' own beats) produce overlapping waves rather than one beat's
+  wave cutting off another's, each still always completing its own full sweep before dropping out. So Strip
+  2's mirrored placement (below) is the only thing that makes any of it look like it's coming from the other
+  side. Strip 2 winds from the opposite end of the coil to
+  Strip 1 -- its index 0 sits at the top instead of the bottom -- so their placement mirrors each other; the
+  underlying data isn't touched, index 0 is still each participant's own first LED.
+  With <b>Double helix</b> unchecked, the two strips are simply 180° apart (P1, P2) around the coil. Checked,
+  each participant additionally draws a second strand of their own 180° from their first, and the two
+  participants are spaced 90° apart instead, so all four strands (P1a/P1b/P2a/P2b) land evenly around the
+  coil without overlapping — the second strand of each pair renders the same participant's one LED array
+  (fuller-looking coil, no gaps when viewed edge-on), not a second data source or a second physical strip.
+  Each participant's non-primary strand is drawn dimmer and its index labels are hidden so the four strands
+  stay readable. Red-Blue's brightness/decay math -- <b>Ambient floor / Sparkle peak</b>
+  (<code>LED_AMBIENT_FLOOR</code>, <code>LED_SPARKLE_PEAK</code>) and the per-pixel decay curve -- still
+  matches <code>theinterface.ino</code> exactly, but two things here are design changes, not yet ported
+  back: (1) each lit LED's <i>color</i> is now a random hue drawn from that strip's theme (see above) rather
+  than <code>theinterface.ino</code>'s single flat <code>BEAT_R</code>/<code>BEAT_G</code>/<code>BEAT_B</code>
+  color, and (2) on-beat behavior -- instead of flooding every LED to full brightness (what
+  <code>LedState::checkBeat()</code> still does in the sketch today), each beat here lights a random
+  assortment of <b>Beat sparkles</b> LEDs (default 14 of 44), which then fade out individually through the
+  same per-pixel decay ambient twinkles use -- <b>Beat decay</b> (<code>LED_BEAT_DECAY</code>) no longer
+  shapes the flash itself, it now just times how long ambient twinkles pause after a beat so they don't
+  compete visually with the beat's own sparkles.
+  Turns/radius/height are just this preview's placeholders for the actual physical coil dimensions — plug in
+  real measurements once the mounting is finalized.
+</p>
+
+<script>
+// ── Mirror of Arduino constants (edit here, copy back to theinterface.ino) ──
+const LED_COUNT = 44;
+const NUM_SPARKLES = 6;
+let LED_BEAT_DECAY    = 8;
+let LED_PIXEL_DECAY   = 4;
+let LED_AMBIENT_FLOOR = 3;
+let LED_SPARKLE_PEAK  = 60;
+const LED_UPDATE_MS   = 20; // 50 fps, matches theinterface.ino
+
+// Red-Blue's (displayed name; this is theinterface.ino's Sparkle Twinkle
+// mechanic -- see the pattern-selection comment above) on-beat behavior
+// (design change, NOT yet ported back to theinterface.ino --
+// LedState::checkBeat() there still floods every pixel on a beat; see
+// triggerBeat()/sparklePixelColor() below for the preview).
+let SPARKLE_BEAT_COUNT = 14; // random LEDs lit to full brightness per beat, out of LED_COUNT
+
+// Red-Blue's per-strip color theme (design change, ignores LED color 1/2
+// entirely -- same "pattern owns its palette" precedent as Rainbow
+// Wave/Lava/Eclipse, just themed per participant instead of shared). Each
+// lit LED picks its own random hue (degrees, HSV) inside its strip's
+// range every time it's freshly sparked -- see
+// randomHueInRange()/updateSparkle()/triggerBeat() -- so the strip shows
+// a constantly changing assortment of colors within the theme rather than
+// one flat color. Strip 1 ("the red lights") ranges red -> orange; Strip 2
+// ("the blue lights") ranges blue -> purple. (Pattern 8, "Sparkle", is a
+// separate yellowish twinkle -- see TWINKLE_* below -- not themed by
+// strip and not related to this color range.)
+const SPARKLE_HUE_RANGE_1 = [0, 35];    // red -> orange
+const SPARKLE_HUE_RANGE_2 = [210, 285]; // blue -> purple
+function randomHueInRange([lo, hi]) { return lo + Math.random() * (hi - lo); }
+
+// Chase's own fixed color identity -- pure red, ignoring LED color 1/2,
+// same "pattern owns its palette" precedent as Rainbow Wave/Lava/Eclipse/
+// Sparkle. With this, none of the five patterns read LED color 1/2
+// anymore -- those pickers are currently unused; left in place in case a
+// future pattern wants participant tinting again.
+const CHASE_COLOR = { r: 255, g: 0, b: 0 };
+
+// Rainbow Wave tuning (design preview, not yet in theinterface.ino).
+let WAVE_TRAVEL_MS = 900;  // time for the wavefront to cross the full strip, index 0 -> LED_COUNT-1
+let WAVE_TAIL_LEN  = 10;   // trailing rainbow tail length, in LEDs
+
+// Lava tuning (design preview, not yet in theinterface.ino) — see updateLava().
+let LAVA_UPDATE_MS  = 90;  // how often the heat sim actually advances (throttled below LED_UPDATE_MS's
+                            // 50fps render rate so the flow reads as slow-moving lava, not a flicker)
+let LAVA_COOLING    = 120; // heat lost per LED per *sim step* -- higher cools/shrinks the flow faster
+let LAVA_SPARKING   = 50;  // out of 255 chance per sim step of a small ambient ember near the source,
+                            // so the flow never goes fully dark between beats
+let LAVA_BEAT_BURST = 4;   // number of LEDs near the source driven to full heat by each beat
+
+// Eclipse tuning (design preview, not yet in theinterface.ino) — see updateEclipse().
+let ECLIPSE_TRAVEL_MS    = 1750; // time for the shadow to sweep fully across and off the strip
+let ECLIPSE_UMBRA_RADIUS = 6;    // radius (in LEDs) of the near-total-darkness zone at the shadow's center
+let ECLIPSE_CORONA_WIDTH = 4;    // width (in LEDs) of the bright ring just outside the umbra
+
+// Eclipse's own fixed color identity -- rather than each participant's LED
+// color (same "pattern owns its palette" precedent as Lava's fire colors
+// and Rainbow Wave's hue sweep). Sun is a cloudy, foggy blue -- desaturated
+// and muted like an overcast sky rather than a vivid or pale one; totality
+// is pure black and the corona flash is pure white, for maximum contrast
+// against it.
+const ECLIPSE_SUN_COLOR    = { r: 70,  g: 90,  b: 140 }; // cloudy/foggy blue-grey "sun" baseline (out of sync)
+const ECLIPSE_CORONA_COLOR = { r: 255, g: 255, b: 255 }; // pure white corona flash
+const ECLIPSE_SHADOW_COLOR = { r: 0,   g: 0,   b: 0   }; // pure black at totality
+
+// When the two hearts are in sync -- BPM delta at/under
+// ECLIPSE_SYNC_THRESHOLD, same concept as Plant's sync detection -- the
+// "sun" itself slowly shifts from ECLIPSE_SUN_COLOR toward this warm
+// orange-yellow over ECLIPSE_SYNC_COLOR_MS, and eases back to blue over
+// the same duration once they drift back out of sync. eclipseSyncT (0 =
+// blue, 1 = orange-yellow) and the blended eclipseSunColorNow are both
+// advanced once per frame in updateEclipseSyncColor() -- not per
+// participant -- since sync is a joint property of both hearts, not
+// something either strip has independently; both strips' shadows still
+// travel on their own independent timing, only the shared sun color
+// shifts together.
+const ECLIPSE_SYNC_SUN_COLOR = { r: 230, g: 150, b: 30 };
+let ECLIPSE_SYNC_THRESHOLD = 4;   // BPM delta at/under which the two hearts count as "synced"
+let ECLIPSE_SYNC_COLOR_MS  = 3000; // time for the sun color to fully transition when sync status changes
+let eclipseSyncT = 0; // 0 = fully blue, 1 = fully orange-yellow
+let eclipseSunColorNow = { r: ECLIPSE_SUN_COLOR.r, g: ECLIPSE_SUN_COLOR.g, b: ECLIPSE_SUN_COLOR.b };
+
+function updateEclipseSyncColor() {
+  const synced = Math.abs(bpm1 - bpm2) <= ECLIPSE_SYNC_THRESHOLD;
+  const step = LED_UPDATE_MS / ECLIPSE_SYNC_COLOR_MS;
+  eclipseSyncT = synced ? Math.min(1, eclipseSyncT + step) : Math.max(0, eclipseSyncT - step);
+
+  eclipseSunColorNow.r = lerp(ECLIPSE_SUN_COLOR.r, ECLIPSE_SYNC_SUN_COLOR.r, eclipseSyncT);
+  eclipseSunColorNow.g = lerp(ECLIPSE_SUN_COLOR.g, ECLIPSE_SYNC_SUN_COLOR.g, eclipseSyncT);
+  eclipseSunColorNow.b = lerp(ECLIPSE_SUN_COLOR.b, ECLIPSE_SYNC_SUN_COLOR.b, eclipseSyncT);
+}
+
+// Rings tuning (design preview, not yet in theinterface.ino) — see updateRings().
+// Unlike Rainbow Wave/Lava's one-sided trailing tail, a ring is a
+// symmetric band centered on its front, fading out on both the leading
+// and trailing edge. Fixed pure white, ignoring LED color 1/2 -- same
+// "pattern owns its palette" precedent as Rainbow Wave/Lava/Eclipse.
+let RING_TRAVEL_MS = 700; // time for the ring to travel index 0 -> LED_COUNT-1
+let RING_WIDTH     = 6;   // width of the lit band, in LEDs, centered on the ring's front
+const RING_COLOR   = { r: 255, g: 255, b: 255 }; // pure white
+
+// Plant tuning (design preview, not yet in theinterface.ino) — see
+// updatePlant(). Unlike every other pattern, growth is *cumulative*
+// across beats rather than a transient event that decays back to
+// ambient: each beat adds one more grown LED starting from index 0 (the
+// "roots") and reaching toward LED_COUNT-1, instead of firing a pulse
+// that fades. Fixed green, ignoring LED color 1/2 -- same "pattern owns
+// its palette" precedent as Rainbow Wave/Lava/Eclipse/Rings -- but with a
+// little per-LED hue variation (like real leaves) rather than one flat
+// shade. Brightness has two decay phases: a fast initial shimmer settle
+// (PLANT_DECAY, down to PLANT_MATURE_BRIGHTNESS) followed by a much
+// slower continuous aging dim (PLANT_AGE_DECAY, down to PLANT_AGED_FLOOR)
+// that never fully stops -- since color is rendered as hsvToRgb(hue, 1,
+// brightness/255), dimming *is* darkening here: the older a leaf gets,
+// the dimmer and darker its green becomes, asymptoting at a dark but
+// still-visible aged floor rather than fading to black.
+let PLANT_MATURE_BRIGHTNESS = 150; // brightness a grown LED settles to after its initial shimmer
+let PLANT_DECAY = 6;               // per-frame falloff from the fresh-growth peak (255) down to mature brightness
+let PLANT_AGE_DECAY = 0.1;         // per-frame falloff from mature brightness onward -- slow, continuous, never stops
+let PLANT_AGED_FLOOR = 25;         // darkest a fully-aged leaf gets; keeps old growth faintly visible, not invisible
+const PLANT_HUE_MIN = 95, PLANT_HUE_MAX = 140; // yellow-green -> teal-green, organic variation per leaf
+
+// Plant's "flower" and fade-out behavior. Violet flowers bloom along the
+// already-grown green stem whenever the two hearts are in sync -- BPM
+// delta at/under PLANT_SYNC_THRESHOLD (default 4, tighter than
+// DESIGN.md's ~5-10 BPM figure for the real near-sync behavior) --
+// checked against bpm1/bpm2 in triggerBeat() (see below) regardless of
+// pattern, but only acted on for Plant, and never on the most recently
+// grown LED (the growth tip is
+// still doing its own shimmer -- see triggerBeat()). Each bloom follows a
+// fade-in / hold / fade-out envelope (FLOWER_FADE_IN_MS /
+// FLOWER_HOLD_MS / FLOWER_FADE_OUT_MS, same attack/hold/decay shape as
+// theinterface.ino's motor lobeIntensity()) computed from a per-LED start
+// timestamp rather than a simple per-frame decay, so a bloom rises in,
+// visibly holds at full brightness, then eases back out -- see
+// updatePlant(). The result (flowerBright) is blended on top of the
+// underlying green in plantPixelColor(), not a permanent recolor. Once
+// the plant reaches LED_COUNT, instead of an abrupt reset the whole strip
+// eases down to LED_AMBIENT_FLOOR over PLANT_FADEOUT_MS (see
+// updatePlant()) before a new plant starts growing.
+const VIOLET_COLOR = { r: 170, g: 60, b: 230 };
+let PLANT_SYNC_THRESHOLD = 4;  // BPM delta at/under which the two hearts count as "synced"
+let PLANT_FLOWER_COUNT = 1;    // violet blooms spawned per synced beat
+let FLOWER_FADE_IN_MS  = 300;  // time for a bloom to rise from 0 to full brightness
+let FLOWER_HOLD_MS     = 600;  // time a bloom stays at full brightness before fading out
+let FLOWER_FADE_OUT_MS = 900;  // time for a bloom to ease back down to 0
+let PLANT_FADEOUT_MS = 2000;   // how long the whole strip takes to ease out once fully grown
+
+// Slow Rainbow tuning (design preview, not yet in theinterface.ino) — see
+// updateSlowRainbow(). Unlike Rainbow Wave, this isn't a beat-triggered
+// traveling wave -- it's a continuously flowing, ambient rainbow gradient
+// across the whole strip (spatial hue by position, drifting slowly over
+// time) with a slow brightness "breathing" cycle, running regardless of
+// whether any beats are firing at all. The ambient cycle itself never
+// stops or resets for a beat -- true to a "slow-fading rainbow" as its
+// own calm, continuous mood rather than an event-driven pulse -- but each
+// heartbeat still visibly does something: rather than flashing
+// brightness, it gives the drifting colors a brief extra push
+// (SLOW_RAINBOW_BEAT_KICK, reusing the shared beatPulse timer every
+// pattern gets from triggerBeat() as the kick's own decay curve), so a
+// beat reads as the rainbow's colors jumping/sliding forward for a
+// moment rather than the strip flashing. Its baseline drift speed isn't
+// fixed either: SLOW_RAINBOW_HUE_SPEED is the speed at
+// SLOW_RAINBOW_REFERENCE_BPM, scaled by the combined average of bpm1 and
+// bpm2 -- both hearts pushing the pace faster together makes the colors
+// visibly move faster, and slower hearts make it drift more languidly.
+// Shared across both strips (like Eclipse's sync color) since it's a
+// property of both participants together, not either one alone.
+let SLOW_RAINBOW_HUE_SPEED = 20;   // degrees per second the rainbow gradient drifts, at the reference BPM
+let SLOW_RAINBOW_REFERENCE_BPM = 70; // combined avg BPM at which Hue speed plays at face value
+let SLOW_RAINBOW_FADE_MS = 6000;   // period of the slow brightness breathing cycle (one full dim-to-bright-to-dim)
+let SLOW_RAINBOW_MIN_BRIGHTNESS = 20;  // dimmest point of the breathing cycle
+let SLOW_RAINBOW_MAX_BRIGHTNESS = 180; // brightest point of the breathing cycle
+let SLOW_RAINBOW_BEAT_KICK = 150;  // extra deg/sec of hue speed at full beatPulse (255), easing out as it decays
+
+// Sparkle tuning (design preview, not yet in theinterface.ino) — see
+// updateTwinkle(). A second, differently-themed twinkle pattern alongside
+// Red-Blue (pattern 0): warm yellow-gold instead of red/blue, not themed
+// per strip (both strips share the same hue range), and each strip's
+// twinkle *rate* is driven by that strip's own BPM rather than being
+// beat-triggered at all -- no triggerBeat() case for pattern 8, the
+// ambient pop rate itself is the response to heart rate. Uses its own
+// TWINKLE_* constants and state fields (twinklePos/twinkleTimer/
+// twinkleBright/twinkleHue) rather than reusing Red-Blue's SPARKLE_*/
+// sparklePos/etc so the two patterns tune independently.
+const TWINKLE_HUE_MIN = 42, TWINKLE_HUE_MAX = 58; // warm gold -> yellow
+let TWINKLE_PEAK = 80;            // peak brightness a twinkle pops to
+let TWINKLE_REFERENCE_BPM = 70;   // BPM at which Min/Max interval below apply at face value
+let TWINKLE_MIN_INTERVAL = 15;    // fastest frames between a slot's pops, at the reference BPM
+let TWINKLE_MAX_INTERVAL = 50;    // slowest frames between a slot's pops, at the reference BPM
+
+// Aurora tuning (design preview, not yet in theinterface.ino) — see
+// updateAurora()/auroraPixelColor(). A continuously animated, organic
+// "curtain" of light (three overlapping sine waves at different spatial
+// frequencies and phase speeds, so the shape never exactly repeats), not
+// beat-triggered at all -- like Slow Rainbow, it's ambient and keeps
+// running whether or not any beats fire. Green-to-teal dominates (the
+// most common real aurora color), with position along the strip -- index
+// 0 treated as the bottom, same convention Plant uses -- layering in
+// blue/purple low and a small red fringe high, matching where those
+// colors actually occur in a real aurora (see auroraPixelColor()). Two
+// things respond to the hearts, though: (1) AURORA_INTENSITY_REFERENCE_BPM --
+// each strip's own current BPM scales *its own* curtain's brightness
+// independently (a faster heart brightens/intensifies its aurora, a
+// slower one dims it), unlike the shared/joint values below; and (2) a
+// rare magenta/pink shimmer (AURORA_SYNC_COLOR -- real auroras do show
+// pink/red during intense activity) fades in wherever the curtain is
+// already bright whenever the two hearts are in sync (BPM delta at/under
+// AURORA_SYNC_THRESHOLD, same concept as Plant/Eclipse's sync detection),
+// and eases back out over AURORA_SYNC_COLOR_MS once they drift apart --
+// shared across both strips (like Eclipse's sync color) since it's a
+// property of both participants together, computed once per frame in
+// updateAuroraSyncColor(), not per state.
+let AURORA_WAVE_SPEED = 0.3;       // how fast the curtain's shape drifts (radians/sec-ish scale)
+let AURORA_BASE_BRIGHTNESS = 40;   // baseline glow between the curtain's bright bands
+let AURORA_INTENSITY_REFERENCE_BPM = 70; // BPM at which a strip's own intensity multiplier is 1
+let AURORA_SYNC_THRESHOLD = 4;     // BPM delta at/under which the two hearts count as "synced"
+let AURORA_SYNC_COLOR_MS = 3000;   // time for the pink sync shimmer to fade in/out
+const AURORA_SYNC_COLOR = { r: 230, g: 60, b: 160 }; // magenta/pink, the "synced hearts" aurora color
+let auroraSyncT = 0; // 0 = no shimmer, 1 = full shimmer -- advanced once per frame in updateAuroraSyncColor()
+
+function updateAuroraSyncColor() {
+  const synced = Math.abs(bpm1 - bpm2) <= AURORA_SYNC_THRESHOLD;
+  const step = LED_UPDATE_MS / AURORA_SYNC_COLOR_MS;
+  auroraSyncT = synced ? Math.min(1, auroraSyncT + step) : Math.max(0, auroraSyncT - step);
+}
+
+// Per-participant color, since both strips now share one coil and need to
+// read apart. Defaults match the existing Beat 1 (orange) / Beat 2 (blue)
+// button colors elsewhere in this UI.
+let beatRGB1 = { r: 220, g: 60, b: 0 };
+let beatRGB2 = { r: 0, g: 144, b: 192 };
+
+function hexToRgb(hex) {
+  return {
+    r: parseInt(hex.slice(1,3),16),
+    g: parseInt(hex.slice(3,5),16),
+    b: parseInt(hex.slice(5,7),16),
+  };
+}
+function updateColor() {
+  beatRGB1 = hexToRgb(document.getElementById('beat-color1').value);
+  beatRGB2 = hexToRgb(document.getElementById('beat-color2').value);
+}
+
+// hue: 0-360, s/v: 0-1 -> {r,g,b} 0-255
+function hsvToRgb(h, s, v) {
+  const c = v * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+  if      (h <  60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
+}
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// ── Per-strip state — exact port of LedState from theinterface.ino, plus
+// fields for the other two preview patterns ─────────────────────────────
+function makeLedState(sparkleHueRange) {
+  return {
+    pxBright: new Uint8Array(LED_COUNT).fill(LED_AMBIENT_FLOOR),
+    beatPulse: 0,
+    sparklePos: Array.from({length: NUM_SPARKLES}, () => Math.floor(Math.random()*LED_COUNT)),
+    sparkleTimer: Array.from({length: NUM_SPARKLES}, () => Math.floor(Math.random()*30)+10),
+    // Red-Blue's per-pixel color theme -- see SPARKLE_HUE_RANGE_1/2
+    // above. hueRange is fixed per strip; hue[i] is reassigned within it
+    // each time pixel i is freshly sparked.
+    hueRange: sparkleHueRange,
+    hue: Array.from({length: LED_COUNT}, () => randomHueInRange(sparkleHueRange)),
+    // Chase (design preview)
+    chaseHead: 0,
+    // Rainbow Wave (design preview). waveStarts holds one start timestamp
+    // per wave currently in flight -- multiple beats landing close
+    // together each add their own wave rather than one replacing another,
+    // so several can travel the strip at once. waveFronts/hueShift are
+    // the per-frame cache updateRainbowWave() computes from it and
+    // rainbowPixelColor() reads (not mutates) -- safe to call per pixel,
+    // and even twice per pixel for double-helix's two strands.
+    waveStarts: [],
+    waveFronts: [], hueShift: 0,
+    // Lava (design preview). Per-LED heat, 0-255 -- see updateLava().
+    // lastLavaUpdate gates how often the sim actually steps (LAVA_UPDATE_MS).
+    heat: new Float64Array(LED_COUNT).fill(0),
+    lastLavaUpdate: 0,
+    // Eclipse (design preview). eclipseStartTime === null means no shadow
+    // in flight, waiting for the next beat. eclipsePos/eclipseActive are
+    // cached once per frame by updateEclipse() and read (not mutated) by
+    // eclipsePixelColor().
+    eclipseStartTime: null,
+    eclipsePos: 0, eclipseActive: false,
+    // Rings (design preview). ringStartTime === null means no ring in
+    // flight, waiting for the next beat. ringFront is cached once per
+    // frame by updateRings() and read (not mutated) by ringsPixelColor().
+    ringStartTime: null,
+    ringFront: -1000,
+    // Plant (design preview). plantLength is how many LEDs from index 0
+    // have been grown so far (cumulative across beats, unlike every other
+    // pattern's state). plantBright/plantHue hold each grown LED's
+    // shimmer/aging-decay brightness and its own randomly-picked leaf hue.
+    // plantBright is a Float64Array, not Uint8Array like pxBright --
+    // PLANT_AGE_DECAY is sub-1-per-frame, and an integer array would
+    // truncate that fractional decay to zero every single step.
+    plantLength: 0,
+    plantBright: new Float64Array(LED_COUNT).fill(LED_AMBIENT_FLOOR),
+    plantHue: new Float64Array(LED_COUNT).fill(PLANT_HUE_MIN),
+    // Violet flower overlay and the fully-grown fade-out transition -- see
+    // the block of comments above VIOLET_COLOR. flowerStart[i] < 0 means
+    // no bloom in flight at LED i; flowerBright[i] is the envelope value
+    // updatePlant() computes from it each frame, read (not mutated) by
+    // plantPixelColor().
+    flowerStart: new Float64Array(LED_COUNT).fill(-1),
+    flowerBright: new Float64Array(LED_COUNT).fill(0),
+    plantFadeOutStart: null,
+    plantFadeOutFrom: new Float64Array(LED_COUNT),
+    // Slow Rainbow (design preview). Both cached once per frame by
+    // updateSlowRainbow() and read (not mutated) by slowRainbowPixelColor().
+    slowRainbowHue: 0,
+    slowRainbowBrightness: 0,
+    // Sparkle (design preview) -- yellowish twinkle, own state separate
+    // from Red-Blue's sparklePos/sparkleTimer/hue/hueRange above.
+    twinklePos: Array.from({length: NUM_SPARKLES}, () => Math.floor(Math.random()*LED_COUNT)),
+    twinkleTimer: Array.from({length: NUM_SPARKLES}, () => Math.floor(Math.random()*30)+10),
+    twinkleBright: new Float64Array(LED_COUNT).fill(LED_AMBIENT_FLOOR),
+    twinkleHue: new Float64Array(LED_COUNT).fill(TWINKLE_HUE_MIN),
+    // Aurora (design preview). auroraPhase is a running accumulator (like
+    // Slow Rainbow's hue phase), started at a random offset so the two
+    // strips' curtains don't move in lockstep; auroraIntensity is this
+    // strip's own BPM-driven brightness multiplier. Both cached once per
+    // frame by updateAurora() and read (not mutated) by auroraPixelColor().
+    auroraPhase: Math.random() * 1000,
+    auroraIntensity: 1,
+  };
+}
+let led1 = makeLedState(SPARKLE_HUE_RANGE_1); // Strip 1: red -> orange
+let led2 = makeLedState(SPARKLE_HUE_RANGE_2); // Strip 2: blue -> purple
+
+// ── Pattern selection (0-9, applies to both pairs at once) ──────────────
+// Pattern 0 is displayed as "Red-Blue" -- it's the original Sparkle
+// Twinkle mechanic from theinterface.ino's LedState (per-strip red-orange
+// / blue-purple hue themes, see SPARKLE_HUE_RANGE_1/2 below), renamed in
+// this UI now that pattern 8, "Sparkle", exists as a separate yellowish
+// twinkle. The underlying SPARKLE_*/updateSparkle()/sparklePixelColor()
+// code identity is unchanged -- only the button label and patNames text
+// moved; theinterface.ino's actual LedState is still what's being
+// mirrored here.
+let currentPattern = 0;
+const patNames = ['Red-Blue', 'Chase', 'Rainbow Wave', 'Lava', 'Eclipse', 'Rings', 'Plant', 'Slow Rainbow', 'Sparkle', 'Aurora'];
+function setPattern(n) {
+  currentPattern = n;
+  document.getElementById('pat-name').textContent = patNames[n];
+  document.querySelectorAll('.pattern-btn').forEach(b => b.classList.toggle('active', +b.dataset.pattern === n));
+  for (const state of [led1, led2]) {
+    state.pxBright.fill(LED_AMBIENT_FLOOR);
+    state.beatPulse = 0;
+    state.chaseHead = 0;
+    state.waveStarts = [];
+    state.waveFronts = [];
+    state.heat.fill(0);
+    state.eclipseStartTime = null;
+    state.ringStartTime = null;
+    state.plantLength = 0;
+    state.plantBright.fill(LED_AMBIENT_FLOOR);
+    state.flowerStart.fill(-1);
+    state.flowerBright.fill(0);
+    state.plantFadeOutStart = null;
+    state.twinkleBright.fill(LED_AMBIENT_FLOOR);
+  }
+}
+
+// Mirrors the real hardware's A0 button (see CLAUDE.md's pin table --
+// "Button — cycle LED patterns"): advances to the next pattern, wrapping
+// back to 0 after the last one, reusing all of setPattern()'s own reset
+// logic rather than duplicating it.
+function cyclePattern() {
+  setPattern((currentPattern + 1) % patNames.length);
+}
+
+function triggerBeat(state) {
+  state.beatPulse = 255; // "beat in flight" timer -- gates the ambient-sparkle freeze below and the status readout
+  if (currentPattern === 0) {
+    // Sparkle: light a random assortment of LEDs rather than flashing the
+    // whole strip at once. Each one then fades independently through the
+    // same per-pixel decay updateSparkle() already uses for ambient
+    // twinkles -- a beat is just a bigger, coordinated batch of sparkles.
+    // Each also gets a fresh random hue within this strip's theme, same
+    // as an ambient twinkle would.
+    for (let n = 0; n < SPARKLE_BEAT_COUNT; n++) {
+      const idx = Math.floor(Math.random() * LED_COUNT);
+      state.pxBright[idx] = 255;
+      state.hue[idx] = randomHueInRange(state.hueRange);
+    }
+  }
+  if (currentPattern === 1) state.chaseHead = 0; // reset chase on beat
+  if (currentPattern === 2) {
+    // Each beat adds its own wave rather than resetting/replacing
+    // whatever's already traveling -- multiple waves can be in flight at
+    // once, and every one of them always completes its full sweep to the
+    // end of the strip (see updateRainbowWave()) instead of getting cut
+    // short by the next beat (same "complete the journey" idea as
+    // Eclipse's shadow pass, just allowing overlap instead of blocking).
+    state.waveStarts.push(performance.now());
+  }
+  if (currentPattern === 3) {                    // Lava: pump a fresh burst of magma in at the source
+    for (let k = 0; k < LAVA_BEAT_BURST && k < LED_COUNT; k++) state.heat[k] = 255;
+  }
+  if (currentPattern === 4 && state.eclipseStartTime === null) {
+    // Only launch a fresh shadow pass if the last one has already finished
+    // -- a beat landing mid-journey no longer restarts it from index 0, so
+    // the shadow always completes its full sweep to the end of the strip
+    // instead of getting cut short by the next beat.
+    state.eclipseStartTime = performance.now();
+  }
+  if (currentPattern === 5) state.ringStartTime = performance.now();    // launch a fresh ring from index 0 on beat
+  if (currentPattern === 6) {
+    // Plant: growth is cumulative, not a transient event. Growth pauses
+    // once fully grown (every LED lit) -- updatePlant() handles the
+    // fade-out-and-restart automatically, on its own timer, rather than
+    // this beat forcing an abrupt reset.
+    if (state.plantLength < LED_COUNT) {
+      const idx = state.plantLength;
+      state.plantHue[idx] = randomHueInRange([PLANT_HUE_MIN, PLANT_HUE_MAX]);
+      state.plantBright[idx] = 255; // fresh growth shimmer, decays down to PLANT_MATURE_BRIGHTNESS
+      state.plantLength++;
+    }
+    // Violet flowers bloom along the already-grown stem whenever the two
+    // hearts are in sync (see VIOLET_COLOR above) -- checked on every
+    // Plant beat, from either strip, against the shared bpm1/bpm2 sliders.
+    // Excludes the growth tip (plantLength-1): it's still doing its own
+    // fresh-growth shimmer, so a flower there would compete visually with
+    // that instead of reading as a separate bloom on established growth --
+    // needs at least 2 grown LEDs (a tip plus something behind it) before
+    // any flower can spawn at all.
+    if (state.plantLength > 1 && Math.abs(bpm1 - bpm2) <= PLANT_SYNC_THRESHOLD) {
+      for (let f = 0; f < PLANT_FLOWER_COUNT; f++) {
+        const idx = Math.floor(Math.random() * (state.plantLength - 1)); // never plantLength-1, the tip
+        state.flowerStart[idx] = performance.now(); // (re)start this LED's fade-in/hold/fade-out envelope
+      }
+    }
+  }
+}
+
+// update() — beat pulse decay is shared by every pattern. No pattern's
+// color math reads it directly anymore (Sparkle used to add it to every
+// pixel for a whole-strip flash; see triggerBeat()/sparklePixelColor()
+// for why that changed) -- it's now just a "beat in flight" timer, used
+// to gate Sparkle's ambient-twinkle picking below and shown in the status
+// readout. Each pattern then advances its own extra state.
+function updateLed(state) {
+  if (state.beatPulse > LED_BEAT_DECAY) state.beatPulse -= LED_BEAT_DECAY;
+  else state.beatPulse = 0;
+
+  if (currentPattern === 0) updateSparkle(state);
+  else if (currentPattern === 1) { if (state.chaseHead < LED_COUNT) state.chaseHead += 1.2; }
+  else if (currentPattern === 2) updateRainbowWave(state);
+  else if (currentPattern === 3) updateLava(state);
+  else if (currentPattern === 4) updateEclipse(state);
+  else if (currentPattern === 5) updateRings(state);
+  else if (currentPattern === 6) updatePlant(state);
+  else if (currentPattern === 7) updateSlowRainbow(state);
+  else if (currentPattern === 8) updateTwinkle(state);
+  else if (currentPattern === 9) updateAurora(state);
+}
+
+function updateSparkle(state) {
+  for (let i = 0; i < LED_COUNT; i++) {
+    if (state.pxBright[i] > LED_AMBIENT_FLOOR + LED_PIXEL_DECAY)
+      state.pxBright[i] -= LED_PIXEL_DECAY;
+    else
+      state.pxBright[i] = LED_AMBIENT_FLOOR;
+  }
+  // Ambient twinkles pause while a beat is still in flight (beatPulse > 0,
+  // ~LED_BEAT_DECAY-controlled window after each beat), so new random pops
+  // don't visually compete with the beat's own random assortment right as
+  // it fires -- LEDs already lit by the beat still fade out normally via
+  // the per-pixel decay above either way.
+  if (state.beatPulse === 0) {
+    for (let i = 0; i < NUM_SPARKLES; i++) {
+      if (state.sparkleTimer[i] === 0) {
+        state.sparklePos[i] = Math.floor(Math.random() * LED_COUNT);
+        const idx = state.sparklePos[i];
+        state.pxBright[idx] =
+          Math.floor(Math.random() * (LED_SPARKLE_PEAK - LED_SPARKLE_PEAK/2) + LED_SPARKLE_PEAK/2);
+        state.hue[idx] = randomHueInRange(state.hueRange); // fresh color within this strip's theme
+        state.sparkleTimer[i] = Math.floor(Math.random() * 35) + 15;
+      } else {
+        state.sparkleTimer[i]--;
+      }
+    }
+  }
+}
+
+// Rainbow Wave (design preview) — each beat launches its own wavefront at
+// index 0 that sweeps all the way to index LED_COUNT-1, same direction on
+// both strips (Strip 2 only *looks* like it's coming from the other side
+// because its physical placement is mirrored -- see the `reversed` strip
+// in render()). Multiple beats landing close together each get their own
+// wave rather than one replacing another (see triggerBeat()), so several
+// can be traveling the strip at once, each independently completing its
+// full sweep to the end -- a later beat never cuts an earlier wave short.
+// Every wave tows a short rainbow tail sweeping through the *full* color
+// wheel (hue 0-360, not a truncated range) so it reads as a genuine
+// rainbow band, and that band continuously drifts through hue-space over
+// time (hueShift, shared by all waves on this strip) so consecutive beats
+// don't always start red-at-the-front. A wave drops out of state.waveStarts
+// once its tail has fully exited past LED_COUNT-1; the strip settles back
+// to ambient once none are left. Advance-once (here) / read-per-pixel
+// (rainbowPixelColor) split so state doesn't shift mid-frame between LEDs
+// -- matters for double-helix's two strands, which each read the same
+// state's pixel colors once per frame.
+function updateRainbowWave(state) {
+  const now = performance.now();
+  state.hueShift = (now * 0.05) % 360; // slow continuous cycle through the color wheel, shared by every wave
+
+  // Advance every active wave's front and drop any whose tail has fully
+  // cleared the strip -- filter() rebuilds waveStarts with only the
+  // still-traveling ones in the same pass that builds this frame's
+  // waveFronts cache.
+  const fronts = [];
+  state.waveStarts = state.waveStarts.filter(startTime => {
+    const elapsed = now - startTime;
+    // WAVE_TRAVEL_MS is the time to cross the full strip (LED_COUNT-1 LEDs).
+    const front = (elapsed / WAVE_TRAVEL_MS) * (LED_COUNT - 1);
+    const stillTraveling = front < (LED_COUNT - 1) + WAVE_TAIL_LEN;
+    if (stillTraveling) fronts.push(front);
+    return stillTraveling;
+  });
+
+  state.waveFronts = fronts;
+}
+
+// Lava (design preview) — a classic fire-simulation heat-diffusion loop
+// (cool every LED a little at random, then blend each LED toward the one
+// behind it so heat drifts from the source, index 0, toward the far end)
+// rather than a moving light like the other three patterns. triggerBeat()
+// pumps a fresh burst of heat in at the source on every beat (see
+// LAVA_BEAT_BURST), so the flow visibly surges with each heartbeat, while
+// LAVA_SPARKING keeps a low random ember alight near the source between
+// beats so it never goes fully dark. lavaPixelColor() maps the resulting
+// heat (0-255) through a fixed black -> red -> orange -> yellow -> white
+// palette, same idea as the well-known Fire2012 effect, just flowing
+// along the strip instead of flickering in place.
+//
+// Throttled to LAVA_UPDATE_MS instead of stepping every render frame
+// (LED_UPDATE_MS, 50fps) -- real lava is viscous, and advancing the sim at
+// full frame rate made the cooling/flicker read as fast and jittery
+// rather than a slow-moving flow. Rendering (lavaPixelColor) still runs
+// every frame; only how often the heat itself changes is slowed down.
+function updateLava(state) {
+  const now = performance.now();
+  if (now - state.lastLavaUpdate < LAVA_UPDATE_MS) return;
+  state.lastLavaUpdate = now;
+
+  // Cool every LED down by a random amount -- organic per-pixel flicker
+  // rather than a uniform fade.
+  for (let i = 0; i < LED_COUNT; i++) {
+    const cooldown = Math.random() * ((LAVA_COOLING * 10) / LED_COUNT);
+    state.heat[i] = Math.max(0, state.heat[i] - cooldown);
+  }
+
+  // Heat drifts from the source (index 0) toward the far end: each LED
+  // blends toward the ones behind it (lower index), which still hold last
+  // frame's values since this loop walks from the far end down to the
+  // source -- same "walk backwards through the array" trick Fire2012 uses
+  // to make heat propagate one direction per frame.
+  for (let i = LED_COUNT - 1; i >= 2; i--) {
+    state.heat[i] = (state.heat[i - 1] + state.heat[i - 1] + state.heat[i - 2]) / 3;
+  }
+
+  // Ambient ember near the source, independent of beats, so the flow
+  // keeps quietly simmering at rest.
+  if (Math.random() * 255 < LAVA_SPARKING) {
+    const idx = Math.floor(Math.random() * Math.min(3, LED_COUNT));
+    state.heat[idx] = Math.min(255, state.heat[idx] + Math.random() * 95 + 160);
+  }
+}
+
+// Eclipse (design preview) — runs opposite to every other pattern here:
+// the strip idles at full brightness (a hazy, cloudy-blue "sun" -- see
+// ECLIPSE_SUN_COLOR) instead of a dim ambient floor, and each beat is a
+// *dimming* event rather than a brightening one. Each beat launches a
+// shadow disc whose center sweeps completely through the strip, literally
+// index 0 to index LED_COUNT-1, over ECLIPSE_TRAVEL_MS -- same "index 0 to
+// LED_COUNT-1, no shortcuts" convention as Rainbow Wave's front and
+// Chase's chaseHead. Advance-once (here) / read-per-pixel
+// (eclipsePixelColor) split, same reasoning as Rainbow Wave/Lava: keeps
+// the shadow's position consistent across double-helix's two reads of the
+// same state per frame.
+function updateEclipse(state) {
+  const now = performance.now();
+  let pos = 0, active = false;
+
+  if (state.eclipseStartTime !== null) {
+    const elapsed = now - state.eclipseStartTime;
+    pos = (elapsed / ECLIPSE_TRAVEL_MS) * (LED_COUNT - 1);
+    active = true;
+
+    if (elapsed >= ECLIPSE_TRAVEL_MS) {
+      state.eclipseStartTime = null; // settle back to full sun until next beat
+    }
+  }
+
+  state.eclipsePos = pos;
+  state.eclipseActive = active;
+}
+
+// Rings (design preview) — each beat sends one ring of light out from the
+// direction of index 0, its front sweeping through to index LED_COUNT-1
+// over RING_TRAVEL_MS (same "index 0 to LED_COUNT-1" convention as
+// Rainbow Wave/Chase/Eclipse). Unlike Rainbow Wave/Lava's one-sided
+// trailing tail, the ring is a symmetric band of width RING_WIDTH
+// centered on the front -- it fades out on both its leading and trailing
+// edge, the way an expanding ring or ripple would -- rather than towing a
+// tail behind it. Advance-once (here) / read-per-pixel (ringsPixelColor)
+// split, same reasoning as the other traveling patterns.
+function updateRings(state) {
+  const now = performance.now();
+  let front = -1000; // far off-strip sentinel = ring inactive
+
+  if (state.ringStartTime !== null) {
+    const elapsed = now - state.ringStartTime;
+    front = (elapsed / RING_TRAVEL_MS) * (LED_COUNT - 1);
+
+    if (elapsed >= RING_TRAVEL_MS) {
+      state.ringStartTime = null; // settle back to ambient until next beat
+    }
+  }
+
+  state.ringFront = front;
+}
+
+// Plant (design preview) — see the constants above for the concept.
+// triggerBeat() owns growing plantLength, seeding each newly-grown LED's
+// brightness/hue, and spawning violet flower blooms; this function owns
+// everything time-based: (1) each already-grown LED's brightness, decayed
+// in two phases -- a fast initial shimmer settle down to
+// PLANT_MATURE_BRIGHTNESS, then a slow, never-stopping aging dim down to
+// PLANT_AGED_FLOOR, so the older a leaf gets the dimmer and darker its
+// green becomes (see hsvToRgb usage in plantPixelColor()) -- LEDs beyond
+// plantLength are simply never touched, so they stay at the
+// LED_AMBIENT_FLOOR they were initialized/reset to; (2) each flower
+// bloom's fade-in/hold/fade-out envelope (FLOWER_FADE_IN_MS/
+// FLOWER_HOLD_MS/FLOWER_FADE_OUT_MS), computed from flowerStart[i] rather
+// than decremented per frame; and (3) once the plant reaches LED_COUNT, a
+// smooth PLANT_FADEOUT_MS fade of the whole strip down to
+// LED_AMBIENT_FLOOR -- from a snapshot of wherever each LED's brightness
+// was at the moment fade-out began, not a re-decay from scratch -- before
+// resetting to grow a fresh plant, rather than the abrupt cut a beat used
+// to cause.
+function updatePlant(state) {
+  for (let i = 0; i < state.plantLength; i++) {
+    if (state.plantBright[i] > PLANT_MATURE_BRIGHTNESS) {
+      state.plantBright[i] = Math.max(PLANT_MATURE_BRIGHTNESS, state.plantBright[i] - PLANT_DECAY);
+    } else if (state.plantBright[i] > PLANT_AGED_FLOOR) {
+      state.plantBright[i] = Math.max(PLANT_AGED_FLOOR, state.plantBright[i] - PLANT_AGE_DECAY);
+    }
+  }
+
+  // Each flower's fade-in / hold / fade-out envelope, driven by elapsed
+  // time since flowerStart[i] rather than a per-frame decrement -- same
+  // attack/hold/decay shape as theinterface.ino's motor lobeIntensity().
+  // flowerStart[i] < 0 means no bloom in flight there.
+  const now = performance.now();
+  for (let i = 0; i < LED_COUNT; i++) {
+    if (state.flowerStart[i] < 0) continue;
+
+    const elapsed = now - state.flowerStart[i];
+    if (elapsed < FLOWER_FADE_IN_MS) {
+      state.flowerBright[i] = 255 * (elapsed / FLOWER_FADE_IN_MS);
+    } else if (elapsed < FLOWER_FADE_IN_MS + FLOWER_HOLD_MS) {
+      state.flowerBright[i] = 255;
+    } else if (elapsed < FLOWER_FADE_IN_MS + FLOWER_HOLD_MS + FLOWER_FADE_OUT_MS) {
+      const fadeElapsed = elapsed - FLOWER_FADE_IN_MS - FLOWER_HOLD_MS;
+      state.flowerBright[i] = 255 * (1 - fadeElapsed / FLOWER_FADE_OUT_MS);
+    } else {
+      state.flowerBright[i] = 0;
+      state.flowerStart[i] = -1; // envelope finished
+    }
+  }
+
+  if (state.plantLength >= LED_COUNT) {
+    if (state.plantFadeOutStart === null) {
+      state.plantFadeOutStart = performance.now();
+      state.plantFadeOutFrom.set(state.plantBright); // snapshot -- fade from here, not from PLANT_MATURE_BRIGHTNESS
+    }
+    const elapsed = performance.now() - state.plantFadeOutStart;
+    const t = Math.min(1, elapsed / PLANT_FADEOUT_MS); // 0 just completed -> 1 fully faded
+    for (let i = 0; i < LED_COUNT; i++) {
+      state.plantBright[i] = lerp(state.plantFadeOutFrom[i], LED_AMBIENT_FLOOR, t);
+    }
+    if (t >= 1) {
+      state.plantLength = 0;
+      state.plantBright.fill(LED_AMBIENT_FLOOR);
+      state.flowerStart.fill(-1);
+      state.flowerBright.fill(0);
+      state.plantFadeOutStart = null; // ready to grow a fresh plant on the next beat
+    }
+  }
+}
+
+// Slow Rainbow (design preview) — see the constants above for the
+// concept. Two values, cached once per frame for slowRainbowPixelColor()
+// to read per pixel: a hue phase and a breathing brightness.
+//
+// The hue phase is a running accumulator (state.slowRainbowHue), not
+// recomputed fresh from elapsed wall-clock time each frame -- its speed
+// depends on bpm1/bpm2 (live BPM sliders/+/- buttons) *and* on
+// state.beatPulse (a beat kick, see below), both of which can change
+// moment to moment, so an absolute "now * speed" formula would jump
+// discontinuously whenever either changed. Advancing it by speed * dt
+// every frame instead keeps the drift smooth through any change. Each
+// pixel then offsets from that shared phase by its own position along
+// the strip, giving a spatial rainbow gradient that flows.
+//
+// The beat kick: rather than flashing brightness like most patterns'
+// shared beatPulse usage, here beatPulse adds proportionally to the hue
+// *speed* -- state.beatPulse is already set to 255 and decaying via
+// LED_BEAT_DECAY for every pattern (see triggerBeat()/updateLed()), so
+// reusing it costs no new state and its existing decay curve becomes the
+// kick's own ease-out: colors visibly jump/slide forward right as a beat
+// lands, fastest right away, gradually settling back to the normal
+// BPM-driven pace as beatPulse decays to 0.
+//
+// Brightness breathes between SLOW_RAINBOW_MIN/MAX_BRIGHTNESS on a
+// SLOW_RAINBOW_FADE_MS sine cycle -- that one's fine as an absolute
+// formula since its period is a fixed constant, not BPM- or beat-driven,
+// and beats no longer touch brightness here at all.
+function updateSlowRainbow(state) {
+  const now = performance.now();
+
+  const avgBPM = (bpm1 + bpm2) / 2;
+  const baseSpeed = SLOW_RAINBOW_HUE_SPEED * (avgBPM / SLOW_RAINBOW_REFERENCE_BPM); // deg/sec
+  const kick = (state.beatPulse / 255) * SLOW_RAINBOW_BEAT_KICK; // extra deg/sec, decaying with beatPulse
+  state.slowRainbowHue = (state.slowRainbowHue + (baseSpeed + kick) * LED_UPDATE_MS / 1000) % 360;
+
+  const breathe = (Math.sin((now / SLOW_RAINBOW_FADE_MS) * Math.PI * 2) + 1) / 2; // 0..1
+  state.slowRainbowBrightness = SLOW_RAINBOW_MIN_BRIGHTNESS +
+    breathe * (SLOW_RAINBOW_MAX_BRIGHTNESS - SLOW_RAINBOW_MIN_BRIGHTNESS);
+}
+
+// Sparkle (design preview) — yellowish ambient twinkle, same per-pixel
+// decay-toward-floor idiom as Red-Blue's updateSparkle(), but with its
+// own TWINKLE_* state so the two tune independently, and with no
+// beat-triggered burst at all: the ambient pop rate itself is what
+// responds to heart rate. `state === led1 ? bpm1 : bpm2` reads *this*
+// strip's own BPM (not the combined average Eclipse/Slow Rainbow use --
+// this is each participant's own pace, not a joint one), and scales both
+// ends of the [TWINKLE_MIN_INTERVAL, TWINKLE_MAX_INTERVAL] frame-count
+// range by the same ratio so a faster heart rate shortens every slot's
+// wait proportionally (faster twinkling) while a slower one lengthens it,
+// keeping the relative flicker character consistent regardless of pace.
+function updateTwinkle(state) {
+  for (let i = 0; i < LED_COUNT; i++) {
+    if (state.twinkleBright[i] > LED_AMBIENT_FLOOR + LED_PIXEL_DECAY)
+      state.twinkleBright[i] -= LED_PIXEL_DECAY;
+    else
+      state.twinkleBright[i] = LED_AMBIENT_FLOOR;
+  }
+
+  const myBPM = (state === led1) ? bpm1 : bpm2;
+  const rateScale = TWINKLE_REFERENCE_BPM / myBPM; // >1 when this heart is slower than reference, <1 when faster
+  const minInterval = Math.max(2, TWINKLE_MIN_INTERVAL * rateScale);
+  const maxInterval = Math.max(minInterval + 1, TWINKLE_MAX_INTERVAL * rateScale);
+
+  for (let i = 0; i < NUM_SPARKLES; i++) {
+    // <= 0, not === 0: minInterval/maxInterval are BPM-scaled and usually
+    // non-integer, so the freshly-assigned timer below is a float too.
+    // Decrementing a float by 1 each frame can step straight over 0
+    // (e.g. 15.73 -> 0.73 -> -0.27...) and never hit it exactly -- with
+    // === 0 that slot would then count down forever without ever
+    // re-triggering, and once every slot has drifted past zero the whole
+    // strip stops twinkling for good. This was a real bug, not just
+    // theoretical -- caught it happening after leaving Sparkle running.
+    if (state.twinkleTimer[i] <= 0) {
+      const idx = Math.floor(Math.random() * LED_COUNT);
+      state.twinklePos[i] = idx;
+      state.twinkleBright[idx] = Math.floor(Math.random() * (TWINKLE_PEAK - TWINKLE_PEAK/2) + TWINKLE_PEAK/2);
+      state.twinkleHue[idx] = TWINKLE_HUE_MIN + Math.random() * (TWINKLE_HUE_MAX - TWINKLE_HUE_MIN);
+      state.twinkleTimer[i] = Math.floor(Math.random() * (maxInterval - minInterval) + minInterval);
+    } else {
+      state.twinkleTimer[i]--;
+    }
+  }
+}
+
+// Aurora (design preview) — see the constants above for the concept.
+// Advances this strip's own drifting phase and BPM-driven intensity
+// multiplier; auroraPixelColor() does the actual wave-combining and
+// color math per pixel from these cached values. The shared sync shimmer
+// (auroraSyncT) is advanced separately, once per frame for both strips
+// together, in updateAuroraSyncColor() -- not here.
+function updateAurora(state) {
+  state.auroraPhase += AURORA_WAVE_SPEED * (LED_UPDATE_MS / 1000);
+
+  const myBPM = (state === led1) ? bpm1 : bpm2;
+  // Clamped so a very slow or very fast heart dims/brightens the curtain
+  // noticeably without ever going fully dark or blowing out to solid white.
+  state.auroraIntensity = Math.max(0.3, Math.min(2, myBPM / AURORA_INTENSITY_REFERENCE_BPM));
+}
+
+// ── Per-pixel color, one function per pattern. `rgb` is the calling
+// participant's own color (beatRGB1/beatRGB2) -- see render(). ──────────
+function pixelColor(state, i, rgb) {
+  switch (currentPattern) {
+    case 1: return chasePixelColor(state, i, rgb);
+    case 2: return rainbowPixelColor(state, i, rgb);
+    case 3: return lavaPixelColor(state, i, rgb);
+    case 4: return eclipsePixelColor(state, i, rgb);
+    case 5: return ringsPixelColor(state, i, rgb);
+    case 6: return plantPixelColor(state, i, rgb);
+    case 7: return slowRainbowPixelColor(state, i, rgb);
+    case 8: return twinklePixelColor(state, i, rgb);
+    case 9: return auroraPixelColor(state, i, rgb);
+    default: return sparklePixelColor(state, i, rgb);
+  }
+}
+
+function sparklePixelColor(state, i, rgb) {
+  // No longer adds state.beatPulse here -- that used to flash every pixel
+  // uniformly on a beat. Now a beat only lights the random LEDs
+  // triggerBeat() picked, via pxBright directly, same as ambient twinkles.
+  // Also ignores `rgb` (LED color 1/2) entirely -- see SPARKLE_HUE_RANGE_1/2
+  // above -- each pixel renders its own last-assigned random hue instead of
+  // one flat participant color.
+  const b = state.pxBright[i];
+  const c = hsvToRgb(state.hue[i], 1, b / 255);
+  return { r: c.r, g: c.g, b: c.b, brightness: b };
+}
+
+function chasePixelColor(state, i, rgb) {
+  // Ignores `rgb` (LED color 1/2) -- see CHASE_COLOR above.
+  const dist = Math.abs(i - state.chaseHead);
+  const glow = Math.max(0, 80 - dist * 12);
+  const b = Math.min(255, glow + LED_AMBIENT_FLOOR);
+  return { r: CHASE_COLOR.r*b/255, g: CHASE_COLOR.g*b/255, b: CHASE_COLOR.b*b/255, brightness: b };
+}
+
+// Pure function of the values updateRainbowWave() cached on state this
+// frame. Loops over every wave currently in state.waveFronts (there can
+// be several at once, see triggerBeat()) and takes the brightest
+// contribution at each pixel, same Math.max blending idiom used
+// elsewhere in this file for overlapping visual elements -- so two waves
+// crossing paths brighten rather than average out or fight each other.
+function rainbowPixelColor(state, i, rgb) {
+  let r = rgb.r * LED_AMBIENT_FLOOR / 255;
+  let g = rgb.g * LED_AMBIENT_FLOOR / 255;
+  let b = rgb.b * LED_AMBIENT_FLOOR / 255;
+
+  for (const front of state.waveFronts) {
+    const dist = front - i;
+    if (dist >= 0 && dist < WAVE_TAIL_LEN) {
+      const brightness = 1 - dist / WAVE_TAIL_LEN;
+      const hue = ((dist / WAVE_TAIL_LEN) * 360 + state.hueShift) % 360; // full spectrum, drifting over time
+      const c = hsvToRgb(hue, 1, brightness);
+      r = Math.max(r, c.r); g = Math.max(g, c.g); b = Math.max(b, c.b);
+    }
+  }
+  return { r, g, b, brightness: Math.max(r, g, b) };
+}
+
+// Fixed black -> deep red -> orange -> yellow -> white palette driven by
+// heat (0-255), independent of participant color -- lava has its own
+// color identity the same way Rainbow Wave's hue sweep does.
+function lavaColor(heat) {
+  const t = Math.min(1, heat / 255);
+  const hue = 8 + t * 42;   // deep red -> orange -> yellow
+  const sat = t < 0.85 ? 1 : 1 - (t - 0.85) / 0.15 * 0.6; // desaturate toward white at the hottest peaks
+  const val = Math.min(1, t * 1.3); // ramps to full brightness before t=1, so more of the flow reads "hot"
+  return hsvToRgb(hue, sat, val);
+}
+
+function lavaPixelColor(state, i, rgb) {
+  const floorR = rgb.r * LED_AMBIENT_FLOOR / 255;
+  const floorG = rgb.g * LED_AMBIENT_FLOOR / 255;
+  const floorB = rgb.b * LED_AMBIENT_FLOOR / 255;
+  const c = lavaColor(state.heat[i]);
+  return {
+    r: Math.max(floorR, c.r),
+    g: Math.max(floorG, c.g),
+    b: Math.max(floorB, c.b),
+    brightness: Math.max(c.r, c.g, c.b),
+  };
+}
+
+// Pure function of the values updateEclipse() cached on state this frame,
+// plus the shared eclipseSunColorNow updateEclipseSyncColor() advances
+// once per frame (see the comment block above it). Baseline is full
+// brightness in that current sun color -- ignores the participant's LED
+// color entirely, same "pattern owns its palette" precedent as
+// Lava/Rainbow Wave. A passing shadow dims it toward ECLIPSE_SHADOW_COLOR
+// (pure black) at the umbra's center -- a squared falloff for a more
+// dramatic plunge into darkness -- with a pure white corona ring
+// (ECLIPSE_CORONA_COLOR) flaring right at the umbra/corona boundary for
+// maximum contrast against that black. Same profile a real eclipse traces
+// at a fixed point on the ground as the moon's shadow sweeps over it:
+// full sun -> partial dimming -> diamond-ring flash -> totality ->
+// diamond-ring flash -> partial -> full sun again.
+function eclipsePixelColor(state, i, rgb) {
+  let r = eclipseSunColorNow.r, g = eclipseSunColorNow.g, b = eclipseSunColorNow.b;
+
+  if (state.eclipseActive) {
+    const dist = Math.abs(i - state.eclipsePos);
+    if (dist < ECLIPSE_UMBRA_RADIUS) {
+      const t = dist / ECLIPSE_UMBRA_RADIUS; // 0 at totality's darkest point -> 1 at the umbra/corona boundary
+      const k = t * t;
+      r = lerp(ECLIPSE_SHADOW_COLOR.r, eclipseSunColorNow.r, k);
+      g = lerp(ECLIPSE_SHADOW_COLOR.g, eclipseSunColorNow.g, k);
+      b = lerp(ECLIPSE_SHADOW_COLOR.b, eclipseSunColorNow.b, k);
+    } else if (dist < ECLIPSE_UMBRA_RADIUS + ECLIPSE_CORONA_WIDTH) {
+      const coronaT = 1 - (dist - ECLIPSE_UMBRA_RADIUS) / ECLIPSE_CORONA_WIDTH; // 1 at inner edge -> 0 at outer edge
+      r = lerp(r, ECLIPSE_CORONA_COLOR.r, coronaT);
+      g = lerp(g, ECLIPSE_CORONA_COLOR.g, coronaT);
+      b = lerp(b, ECLIPSE_CORONA_COLOR.b, coronaT);
+    }
+    // beyond the corona: untouched, full sun
+  }
+
+  return { r, g, b, brightness: Math.max(r, g, b) };
+}
+
+// Pure function of the value updateRings() cached on state this frame.
+// Ignores `rgb` (LED color 1/2) entirely -- see RING_COLOR above.
+function ringsPixelColor(state, i, rgb) {
+  let r = RING_COLOR.r * LED_AMBIENT_FLOOR / 255;
+  let g = RING_COLOR.g * LED_AMBIENT_FLOOR / 255;
+  let b = RING_COLOR.b * LED_AMBIENT_FLOOR / 255;
+
+  const dist = Math.abs(i - state.ringFront);
+  if (dist < RING_WIDTH) {
+    const t = 1 - dist / RING_WIDTH; // 1 at the ring's center -> 0 at its edge
+    r = lerp(r, RING_COLOR.r, t);
+    g = lerp(g, RING_COLOR.g, t);
+    b = lerp(b, RING_COLOR.b, t);
+  }
+
+  return { r, g, b, brightness: Math.max(r, g, b) };
+}
+
+// Ignores `rgb` (LED color 1/2) -- see PLANT_HUE_MIN/MAX above. Grown
+// LEDs (i < plantLength) render their own leaf hue at plantBright[i];
+// ungrown LEDs are just the ambient floor, i.e. not yet sprouted. A
+// violet flower overlay (flowerBright[i]) is then blended on top when
+// present, proportional to how freshly it bloomed -- a temporary tint
+// over the green, not a permanent recolor, so it fades back to reveal
+// whatever the underlying leaf is doing (growing, aging, or fading out).
+function plantPixelColor(state, i, rgb) {
+  const bright = i < state.plantLength ? state.plantBright[i] : LED_AMBIENT_FLOOR;
+  const c = hsvToRgb(state.plantHue[i], 1, bright / 255);
+
+  let r = c.r, g = c.g, b = c.b;
+  const flower = state.flowerBright[i];
+  if (flower > 0) {
+    const t = flower / 255;
+    r = lerp(r, VIOLET_COLOR.r, t);
+    g = lerp(g, VIOLET_COLOR.g, t);
+    b = lerp(b, VIOLET_COLOR.b, t);
+  }
+
+  return { r, g, b, brightness: Math.max(bright, flower) };
+}
+
+// Ignores `rgb` (LED color 1/2) -- see the Slow Rainbow constants above.
+// Position along the strip offsets from the shared drifting hue phase, so
+// the rainbow gradient reads as continuously flowing rather than static.
+// Brightness is purely the breathing value updateSlowRainbow() computed
+// -- heartbeats move the colors (see the beat kick in updateSlowRainbow),
+// not the brightness, so beatPulse never appears here.
+function slowRainbowPixelColor(state, i, rgb) {
+  const hue = (state.slowRainbowHue + (i / LED_COUNT) * 360) % 360;
+  const c = hsvToRgb(hue, 1, state.slowRainbowBrightness / 255);
+  return { r: c.r, g: c.g, b: c.b, brightness: state.slowRainbowBrightness };
+}
+
+// Ignores `rgb` (LED color 1/2) -- see the TWINKLE_* constants above.
+function twinklePixelColor(state, i, rgb) {
+  const b = state.twinkleBright[i];
+  const c = hsvToRgb(state.twinkleHue[i], 1, b / 255);
+  return { r: c.r, g: c.g, b: c.b, brightness: b };
+}
+
+// Ignores `rgb` (LED color 1/2) -- see the Aurora constants above. Three
+// overlapping sine layers at different spatial frequencies and phase
+// speeds (state.auroraPhase, advanced in updateAurora()) combine into an
+// organic "curtain" shape along the strip -- deliberately not a single
+// clean sine, so the bright bands and gaps between them never look like a
+// simple repeating wave. Only the positive combined lobes glow (curtain =
+// max(0, wave)), giving distinct bright bands separated by dim gaps
+// rather than a uniform gradient. Base hue runs from green at each band's
+// brightest point to blue-teal at its edges, the dominant aurora color.
+//
+// On top of that, position along the strip (t, treated as "altitude" the
+// same way Plant treats index 0 as the roots/base) layers in the other
+// real aurora colors by where they actually occur: blue/purple low --
+// nitrogen emission, usually the lowest and often the most saturated
+// fringe -- fully replacing the green/teal over the bottom ~35% of the
+// strip (lowBias reaches 1 at t=0, so the very bottom LED is a true
+// blue-purple, not a diluted tint); and red high -- rarer, fainter,
+// higher-altitude oxygen emission -- the same way, but only over the top
+// ~15% (a small amount, by spatial extent, not by watering down the hue
+// itself: the top LED is true red, it just doesn't get much of the strip
+// to itself). Both are full hue replacements ramped in by t alone, not
+// partial blends -- a partial blend of two hues this far apart on the
+// wheel lands on whatever's between them (cyan/blue) rather than reading
+// as either color, so full-strength-but-spatially-narrow was necessary to
+// actually see purple and red rather than a wash of blue everywhere.
+// This strip's own auroraIntensity (BPM-driven) scales the result before
+// the shared pink sync shimmer (auroraSyncT, see updateAuroraSyncColor())
+// blends in on top, strongest where the curtain is already brightest.
+function auroraPixelColor(state, i, rgb) {
+  const t = i / (LED_COUNT - 1);
+  const w1 = Math.sin(t * Math.PI * 2 * 1.3 + state.auroraPhase);
+  const w2 = Math.sin(t * Math.PI * 2 * 2.7 + state.auroraPhase * 0.6 + 2.1);
+  const w3 = Math.sin(t * Math.PI * 2 * 4.1 + state.auroraPhase * 1.4 + 4.7);
+  const wave = (w1 + w2 * 0.6 + w3 * 0.4) / 2;
+  const curtain = Math.max(0, wave); // 0..~1 -- only the bright bands glow
+
+  const brightness = Math.min(255, (AURORA_BASE_BRIGHTNESS + curtain * 180) * state.auroraIntensity);
+  let hue = 100 + (1 - curtain) * 70; // green at each band's peak -> blue-teal toward its edges
+
+  const lowBias = Math.max(0, 1 - t / 0.35);          // 1 at the very bottom -> 0 by 35% up
+  const lowHue = 210 + lowBias * 65;                  // blue (210) at the 35% mark -> purple (275) at the bottom
+  hue = lerp(hue, lowHue, lowBias);
+
+  const highBias = Math.max(0, (t - 0.85) / 0.15);    // 0 below 85% -> 1 at the very top
+  hue = lerp(hue, 355, highBias);                     // red only in the top 15%
+
+  const c = hsvToRgb(hue, 0.85, brightness / 255);
+  let r = c.r, g = c.g, b = c.b;
+
+  if (auroraSyncT > 0) {
+    const pinkT = auroraSyncT * curtain;
+    r = lerp(r, AURORA_SYNC_COLOR.r, pinkT);
+    g = lerp(g, AURORA_SYNC_COLOR.g, pinkT);
+    b = lerp(b, AURORA_SYNC_COLOR.b, pinkT);
+  }
+
+  return { r, g, b, brightness: Math.max(r, g, b) };
+}
+
+// ── Auto BPM ─────────────────────────────────────────────────────────────
+let autoBPM1 = false, autoBPM2 = false;
+let bpm1 = 70, bpm2 = 76;
+let nextBeat1 = 0, nextBeat2 = 0;
+
+function toggleAutoBPM(n) {
+  if (n === 1) { autoBPM1 = !autoBPM1; document.getElementById('bpm1-toggle').classList.toggle('active', autoBPM1); }
+  else         { autoBPM2 = !autoBPM2; document.getElementById('bpm2-toggle').classList.toggle('active', autoBPM2); }
+}
+
+// Nudges bpm1/bpm2 by delta (the +/- buttons next to each BPM slider),
+// clamped to that slider's own min/max so it can't be pushed out of range,
+// and keeps the slider handle and its readout in sync with the new value.
+function adjustBpm(n, delta) {
+  const slider = document.getElementById('bpm' + n + '-slider');
+  const min = +slider.min, max = +slider.max;
+  const next = Math.max(min, Math.min(max, (n === 1 ? bpm1 : bpm2) + delta));
+  if (n === 1) bpm1 = next; else bpm2 = next;
+  slider.value = next;
+  document.getElementById('bpm' + n + '-val').textContent = next;
+}
+
+// ── Geometry ─────────────────────────────────────────────────────────────
+let turns = 2, radius = 70, height = 320;
+function onGeomChange(input, spanId) {
+  document.getElementById(spanId).textContent = input.value;
+  turns = +document.getElementById('turns-slider').value;
+  radius = +document.getElementById('radius-slider').value;
+  height = +document.getElementById('height-slider').value;
+}
+
+// Returns {x,y,z} in world space for LED index i (0..43), all strands
+// sharing one coil axis at world X = 0 -- both strips spiral together
+// rather than sitting in two side-by-side coils. index 0 = bottom of the
+// coil. strandOffset (radians) rotates a strand around that shared axis;
+// see render() for how participant + double-helix offsets combine into it.
+function ledPosition(i, strandOffset = 0) {
+  const t = i / (LED_COUNT - 1);
+  const angle = t * turns * Math.PI * 2 + strandOffset;
+  const y = (t - 0.5) * height;
+  const x = radius * Math.cos(angle);
+  const z = radius * Math.sin(angle);
+  return { x, y, z };
+}
+
+// ── Camera ───────────────────────────────────────────────────────────────
+let theta = 0.6, phi = 0.35;      // yaw, pitch (radians)
+let camDist = 600;
+let dragging = false, lastMouseX = 0, lastMouseY = 0;
+const canvas = document.getElementById('scene');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * devicePixelRatio;
+  canvas.height = rect.height * devicePixelRatio;
+}
+window.addEventListener('resize', resizeCanvas);
+
+function resetView() {
+  theta = 0.6; phi = 0.35; camDist = 600;
+}
+
+function pointerDown(x, y) { dragging = true; lastMouseX = x; lastMouseY = y; canvas.classList.add('dragging'); }
+function pointerMove(x, y) {
+  if (!dragging) return;
+  theta += (x - lastMouseX) * 0.008;
+  phi   += (y - lastMouseY) * 0.008;
+  phi = Math.max(-1.4, Math.min(1.4, phi));
+  lastMouseX = x; lastMouseY = y;
+}
+function pointerUp() { dragging = false; canvas.classList.remove('dragging'); }
+
+canvas.addEventListener('mousedown', e => pointerDown(e.clientX, e.clientY));
+window.addEventListener('mousemove', e => pointerMove(e.clientX, e.clientY));
+window.addEventListener('mouseup', pointerUp);
+canvas.addEventListener('touchstart', e => { const t = e.touches[0]; pointerDown(t.clientX, t.clientY); }, {passive:true});
+canvas.addEventListener('touchmove', e => { const t = e.touches[0]; pointerMove(t.clientX, t.clientY); }, {passive:true});
+canvas.addEventListener('touchend', pointerUp);
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  camDist = Math.max(250, Math.min(1400, camDist + e.deltaY * 0.6));
+}, {passive:false});
+
+function project(p) {
+  // yaw (around Y), then pitch (around X)
+  const cosT = Math.cos(theta), sinT = Math.sin(theta);
+  const x1 = p.x*cosT + p.z*sinT;
+  const z1 = -p.x*sinT + p.z*cosT;
+  const y1 = p.y;
+
+  const cosP = Math.cos(phi), sinP = Math.sin(phi);
+  const y2 = y1*cosP - z1*sinP;
+  const z2 = y1*sinP + z1*cosP;
+  const x2 = x1;
+
+  // Clamp the denominator so extreme geometry/zoom combinations (camera
+  // effectively inside the coil) can't divide by ~0 or go negative and
+  // flip points through the camera.
+  const denom = Math.max(50, camDist - z2);
+  const scale = camDist / denom;
+  return { sx: x2 * scale, sy: -y2 * scale, scale, depth: z2 };
+}
+
+// ── Main loop ────────────────────────────────────────────────────────────
+let lastLedUpdate = 0;
+function frame(ts) {
+  if (ts - lastLedUpdate >= LED_UPDATE_MS) {
+    lastLedUpdate = ts;
+
+    if (autoBPM1 && ts >= nextBeat1) { triggerBeat(led1); nextBeat1 = ts + 60000/bpm1; }
+    if (autoBPM2 && ts >= nextBeat2) { triggerBeat(led2); nextBeat2 = ts + 60000/bpm2; }
+
+    // Once per frame, not per participant -- sync is a joint property of
+    // both hearts (see the comment block above ECLIPSE_SYNC_SUN_COLOR).
+    updateEclipseSyncColor();
+    updateAuroraSyncColor();
+
+    updateLed(led1);
+    updateLed(led2);
+
+    document.getElementById('pulse1-val').textContent = led1.beatPulse;
+    document.getElementById('pulse2-val').textContent = led2.beatPulse;
+
+    if (document.getElementById('autorotate-toggle').checked && !dragging) {
+      const speed = +document.getElementById('rotspeed-slider').value;
+      theta += speed * 0.0025;
+    }
+  }
+
+  render();
+  requestAnimationFrame(frame);
+}
+
+function render() {
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const cx = w/2, cy = h/2;
+  const dpr = devicePixelRatio;
+
+  const showLabels = document.getElementById('labels-toggle').checked;
+  const doubleHelix = document.getElementById('helix-toggle').checked;
+
+  // Both strips wind around the same coil axis (see ledPosition()) instead
+  // of sitting in two side-by-side coils. Each participant contributes
+  // strandsPerParticipant strands (1 normally, 2 with Double Helix), evenly
+  // spaced around the full circle so nothing lands on top of anything
+  // else: with Double Helix off, P1/P2 sit 180° apart (a plain double
+  // helix); with it on, P1 draws its own pair 180° apart as before, and
+  // P2's pair is rotated 90° from P1's so all four strands (P1a/P1b/P2a/
+  // P2b) are spaced 90° apart around the coil.
+  const strandsPerParticipant = doubleHelix ? 2 : 1;
+  const participantOffsetStep = Math.PI / strandsPerParticipant;
+  const withinParticipantOffsets = doubleHelix ? [0, Math.PI] : [0];
+
+  // P2 winds from the opposite end of the coil to P1: index 0 sits at the
+  // top instead of the bottom. Only the *placement* is mirrored (via
+  // posIndex below) -- pixelColor() still reads the real index i, so the
+  // data/pattern itself (including Rainbow Wave's "index 0 vs
+  // LED_COUNT-1" ends) is unaffected, it's just physically flipped.
+  const strips = [
+    { state: led1, rgb: beatRGB1, name: 'Strip 1 (Participant 1)', baseOffset: 0 * participantOffsetStep, reversed: false },
+    { state: led2, rgb: beatRGB2, name: 'Strip 2 (Participant 2)', baseOffset: 1 * participantOffsetStep, reversed: true },
+  ];
+
+  const points = [];
+  const lines = [];
+  for (const s of strips) {
+    for (const strandOffset of withinParticipantOffsets) {
+      let prevProj = null;
+      for (let i = 0; i < LED_COUNT; i++) {
+        const posIndex = s.reversed ? (LED_COUNT - 1 - i) : i;
+        const pos = ledPosition(posIndex, s.baseOffset + strandOffset);
+        const proj = project(pos);
+        const col = pixelColor(s.state, i, s.rgb);
+        points.push({ proj, col, i, primary: strandOffset === 0 }); // unused `strip` field dropped -- nothing read it
+        if (prevProj) lines.push({ a: prevProj, b: proj, rgb: s.rgb, primary: strandOffset === 0 });
+        prevProj = proj;
+      }
+    }
+  }
+
+  // Draw strip backbone lines first (underneath the LEDs), tinted with
+  // each participant's own color. The non-primary helix strand (Double
+  // Helix on) is drawn a little dimmer so all four strands stay easy to
+  // tell apart even though a pair carries identical LED data.
+  ctx.lineWidth = 2 * dpr;
+  for (const ln of lines) {
+    const a = ln.primary ? 0.22 : 0.10;
+    ctx.strokeStyle = `rgba(${ln.rgb.r|0},${ln.rgb.g|0},${ln.rgb.b|0},${a})`;
+    ctx.beginPath();
+    ctx.moveTo(cx + ln.a.sx*dpr, cy + ln.a.sy*dpr);
+    ctx.lineTo(cx + ln.b.sx*dpr, cy + ln.b.sy*dpr);
+    ctx.stroke();
+  }
+
+  // Depth-sort LEDs so nearer ones draw on top
+  points.sort((a, b) => a.proj.depth - b.proj.depth);
+
+  for (const pt of points) {
+    const { sx, sy, scale } = pt.proj;
+    const screenX = cx + sx*dpr, screenY = cy + sy*dpr;
+    const r = Math.max(1.5, 4 * scale) * dpr;
+    const brightness = pt.col.brightness / 255;
+
+    // Glow
+    if (brightness > 0.15) {
+      const glowR = r * (2.2 + brightness*2);
+      const grad = ctx.createRadialGradient(screenX, screenY, 0, screenX, screenY, glowR);
+      grad.addColorStop(0, `rgba(${pt.col.r|0},${pt.col.g|0},${pt.col.b|0},${0.5*brightness})`);
+      grad.addColorStop(1, `rgba(${pt.col.r|0},${pt.col.g|0},${pt.col.b|0},0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(screenX, screenY, glowR, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // Core pixel
+    ctx.fillStyle = `rgb(${Math.max(6,pt.col.r|0)},${Math.max(6,pt.col.g|0)},${Math.max(6,pt.col.b|0)})`;
+    ctx.beginPath();
+    ctx.arc(screenX, screenY, r, 0, Math.PI*2);
+    ctx.fill();
+
+    if (showLabels && pt.primary && (pt.i % 4 === 0 || pt.i === LED_COUNT-1)) {
+      ctx.fillStyle = 'rgba(200,200,200,0.55)';
+      ctx.font = `${10*dpr}px monospace`;
+      ctx.fillText(pt.i, screenX + 6*dpr, screenY - 6*dpr);
+    }
+  }
+
+  // Strip name labels near the top of the shared coil, stacked vertically
+  // (both strips top out at the same point now that they share one axis)
+  // and colored per participant so they read as a legend.
+  ctx.font = `${12*dpr}px monospace`;
+  const top = project(ledPosition(LED_COUNT - 1, 0));
+  strips.forEach((s, idx) => {
+    ctx.fillStyle = `rgb(${s.rgb.r|0},${s.rgb.g|0},${s.rgb.b|0})`;
+    const tw = ctx.measureText(s.name).width;
+    ctx.fillText(s.name, cx + top.sx*dpr - tw/2, cy + top.sy*dpr - (24 + idx*16)*dpr);
+  });
+}
+
+resizeCanvas();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

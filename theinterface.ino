@@ -67,8 +67,13 @@ const float SPO2_SMOOTHING = 0.1;        // low-pass filter weight applied to ea
 // Red vs. IR AC/DC levels). Widely used in hobbyist MAX30102 projects; NOT
 // clinically calibrated. Good enough as a ratiometric biofeedback cue, not a
 // real pulse-oximeter reading -- see DESIGN.md.
-const double SPO2_RATIO_INTERCEPT = 110.0;
-const double SPO2_RATIO_SLOPE = 25.0;
+// float, not double: the Uno R4's Cortex-M4 FPU is single-precision only, so
+// double math here would silently fall back to slow software emulation for
+// an estimate that's approximate by design anyway. Keeping the whole sketch
+// float-only (see computeRMSSD()/updateSpO2() below) also lets the linker
+// drop the software double-precision library entirely.
+const float SPO2_RATIO_INTERCEPT = 110.0f;
+const float SPO2_RATIO_SLOPE = 25.0f;
 
 // Motor pulse envelope: two short linear ramp-up/ramp-down lobes per beat
 // ("bum-bum") rather than one single pulse, mimicking the lub-dub of a real
@@ -287,7 +292,10 @@ struct HeartChannel
             previous = intervals[idx];
         }
 
-        return (uint16_t)sqrt((double)sumSquaredDiff / (intervalCount - 1));
+        // sqrtf, not sqrt: keeps this on the hardware single-precision FPU
+        // instead of pulling in software double-precision math for a value
+        // that's already an integer millisecond count either way.
+        return (uint16_t)sqrtf((float)sumSquaredDiff / (intervalCount - 1));
     }
 
     // BPM/HRV bookkeeping only -- felt/visual feedback is triggered
@@ -360,15 +368,15 @@ struct HeartChannel
         if (positivePeak < SPO2_MIN_AC || redPositivePeak < SPO2_MIN_AC || irDc <= 0 || redDc <= 0)
             return;
 
-        double irRatio = (double)positivePeak / (double)irDc;
-        double redRatio = (double)redPositivePeak / (double)redDc;
-        double r = redRatio / irRatio;
-        double estimate = SPO2_RATIO_INTERCEPT - SPO2_RATIO_SLOPE * r;
+        float irRatio = (float)positivePeak / (float)irDc;
+        float redRatio = (float)redPositivePeak / (float)redDc;
+        float r = redRatio / irRatio;
+        float estimate = SPO2_RATIO_INTERCEPT - SPO2_RATIO_SLOPE * r;
 
         if (estimate < SPO2_MIN_PLAUSIBLE || estimate > SPO2_MAX_PLAUSIBLE)
             return; // discard rather than smoothing in an implausible outlier
 
-        spo2 = (spo2 <= 0) ? estimate : (spo2 * (1.0 - SPO2_SMOOTHING) + estimate * SPO2_SMOOTHING);
+        spo2 = (spo2 <= 0) ? estimate : (spo2 * (1.0f - SPO2_SMOOTHING) + estimate * SPO2_SMOOTHING);
     }
 
     void process(long red, long ir)

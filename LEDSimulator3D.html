@@ -202,11 +202,6 @@
       <span id="lava-cooling-val">120</span>
     </div>
     <div class="row">
-      <label>Sparking</label>
-      <input type="range" min="0" max="200" value="50" id="lava-sparking-slider" oninput="LAVA_SPARKING=+this.value; document.getElementById('lava-sparking-val').textContent=this.value">
-      <span id="lava-sparking-val">50</span>
-    </div>
-    <div class="row">
       <label>Beat burst</label>
       <input type="range" min="1" max="10" value="4" id="lava-burst-slider" oninput="LAVA_BEAT_BURST=+this.value; document.getElementById('lava-burst-val').textContent=this.value">
       <span id="lava-burst-val">4</span>
@@ -366,6 +361,16 @@
       <input type="range" min="10" max="100" value="50" id="twinkle-maxinterval-slider" oninput="TWINKLE_MAX_INTERVAL=+this.value; document.getElementById('twinkle-maxinterval-val').textContent=this.value">
       <span id="twinkle-maxinterval-val">50</span>
     </div>
+    <div class="row">
+      <label>Beat sparkle count</label>
+      <input type="range" min="0" max="10" value="3" id="twinkle-beatcount-slider" oninput="TWINKLE_BEAT_COUNT=+this.value; document.getElementById('twinkle-beatcount-val').textContent=this.value">
+      <span id="twinkle-beatcount-val">3</span>
+    </div>
+    <div class="row">
+      <label>Beat sparkle brightness</label>
+      <input type="range" min="100" max="255" value="255" id="twinkle-beatbright-slider" oninput="TWINKLE_BEAT_BRIGHTNESS=+this.value; document.getElementById('twinkle-beatbright-val').textContent=this.value">
+      <span id="twinkle-beatbright-val">255</span>
+    </div>
   </div>
 
   <div class="card">
@@ -410,11 +415,12 @@
   <i>Lava</i> is a
   heat-diffusion simulation (cool every LED a little at random, then blend each LED toward the one behind it
   so heat drifts along the strip, colored through a fixed black → red → orange → yellow → white palette)
-  rather than a moving light -- each beat pumps a fresh burst of heat in at index 0 (<b>Beat burst</b>),
-  which then flows and cools down the strip like magma, while <b>Sparking</b> keeps a low ambient ember going
-  between beats so it's never fully dark, <b>Cooling</b> controls how far the flow travels before it dies
-  out, and <b>Flow update</b> throttles how often the heat itself actually changes (independent of the 50fps
-  render loop) so the flow reads as slow-moving lava rather than a fast flicker.
+  rather than a moving light -- the heartbeat is the <i>only</i> heat source: each beat pumps a fresh burst
+  of heat in at index 0 (<b>Beat burst</b>), which then flows and cools down the strip like magma with no
+  ambient ignition of its own, so a strip that hasn't beaten in a while cools all the way to black and stays
+  there. <b>Cooling</b> controls how far each burst's flow travels before it dies out, and <b>Flow
+  update</b> throttles how often the heat itself actually changes (independent of the 50fps render loop) so
+  the flow reads as slow-moving lava rather than a fast flicker.
   <i>Eclipse</i> runs opposite to every other pattern here: the strip idles at full brightness (a cloudy,
   foggy blue "sun," not a warm one) instead of a dim ambient floor, and each beat is a dimming
   event rather than a brightening one -- a shadow disc whose center sweeps completely through the strip,
@@ -469,11 +475,13 @@
   colors instead of the brightness.
   <i>Sparkle</i> is a second, differently-themed twinkle alongside Red-Blue: warm yellow-gold
   (<b>Twinkle peak</b>) instead of red/blue, and not themed per strip -- both strips share the same hue
-  range. Unlike every twinkle-family pattern here, it has no beat-triggered burst at all; instead each
-  strip's ambient pop <i>rate</i> is what responds to heart rate, scaling <b>Min interval</b>/<b>Max
-  interval</b> (in frames, at <b>Reference BPM</b>) by that strip's own current BPM -- a faster heart makes
-  its own strip twinkle faster, a slower one twinkles more languidly, independently per participant rather
-  than a shared/combined value like Eclipse or Slow Rainbow use.
+  range. Heart rate drives it two ways: each strip's ambient pop <i>rate</i> responds continuously to heart
+  rate, scaling <b>Min interval</b>/<b>Max interval</b> (in frames, at <b>Reference BPM</b>) by that strip's
+  own current BPM -- a faster heart makes its own strip twinkle faster, a slower one twinkles more
+  languidly, independently per participant rather than a shared/combined value like Eclipse or Slow Rainbow
+  use -- and on top of that, each heartbeat directly lights <b>Beat sparkle count</b> extra sparkles at
+  <b>Beat sparkle brightness</b>, brighter than the ambient <b>Twinkle peak</b> so the beat's own moment
+  stands out against the background twinkling rather than blending into it.
   <i>Aurora</i> mimics the aurora borealis as an organic, continuously animated "curtain" of light -- three
   overlapping sine waves at different spatial frequencies and phase speeds (<b>Wave speed</b>) combine so
   the bright bands and gaps between them never look like one clean repeating wave, and only the combined
@@ -575,13 +583,16 @@ const CHASE_COLOR = { r: 255, g: 0, b: 0 };
 let WAVE_TRAVEL_MS = 900;  // time for the wavefront to cross the full strip, index 0 -> LED_COUNT-1
 let WAVE_TAIL_LEN  = 10;   // trailing rainbow tail length, in LEDs
 
-// Lava tuning (design preview, not yet in theinterface.ino) — see updateLava().
+// Lava tuning (design preview, not yet in theinterface.ino) — see
+// updateLava(). The heartbeat is the *only* thing that adds heat -- no
+// ambient random ignition -- so the strip reads as cold/dark whenever a
+// participant's heart hasn't beaten in a while, same as it would flatline
+// on the real hardware. Cooling/diffusion still run continuously (they
+// only move or dissipate heat that's already there, never create it).
 let LAVA_UPDATE_MS  = 90;  // how often the heat sim actually advances (throttled below LED_UPDATE_MS's
                             // 50fps render rate so the flow reads as slow-moving lava, not a flicker)
 let LAVA_COOLING    = 120; // heat lost per LED per *sim step* -- higher cools/shrinks the flow faster
-let LAVA_SPARKING   = 50;  // out of 255 chance per sim step of a small ambient ember near the source,
-                            // so the flow never goes fully dark between beats
-let LAVA_BEAT_BURST = 4;   // number of LEDs near the source driven to full heat by each beat
+let LAVA_BEAT_BURST = 4;   // number of LEDs near the source driven to full heat by each beat -- the only heat source
 
 // Eclipse tuning (design preview, not yet in theinterface.ino) — see updateEclipse().
 let ECLIPSE_TRAVEL_MS    = 1750; // time for the shadow to sweep fully across and off the strip
@@ -712,17 +723,21 @@ let SLOW_RAINBOW_BEAT_KICK = 150;  // extra deg/sec of hue speed at full beatPul
 // updateTwinkle(). A second, differently-themed twinkle pattern alongside
 // Red-Blue (pattern 0): warm yellow-gold instead of red/blue, not themed
 // per strip (both strips share the same hue range), and each strip's
-// twinkle *rate* is driven by that strip's own BPM rather than being
-// beat-triggered at all -- no triggerBeat() case for pattern 8, the
-// ambient pop rate itself is the response to heart rate. Uses its own
+// ambient twinkle *rate* is driven by that strip's own BPM (see
+// TWINKLE_REFERENCE_BPM/MIN/MAX_INTERVAL). On top of that ambient
+// twinkling, each heartbeat directly lights TWINKLE_BEAT_COUNT extra
+// sparkles at TWINKLE_BEAT_BRIGHTNESS (brighter than the ambient
+// TWINKLE_PEAK, so they stand out) -- see triggerBeat(). Uses its own
 // TWINKLE_* constants and state fields (twinklePos/twinkleTimer/
 // twinkleBright/twinkleHue) rather than reusing Red-Blue's SPARKLE_*/
 // sparklePos/etc so the two patterns tune independently.
 const TWINKLE_HUE_MIN = 42, TWINKLE_HUE_MAX = 58; // warm gold -> yellow
-let TWINKLE_PEAK = 80;            // peak brightness a twinkle pops to
+let TWINKLE_PEAK = 80;            // peak brightness an ambient twinkle pops to
 let TWINKLE_REFERENCE_BPM = 70;   // BPM at which Min/Max interval below apply at face value
 let TWINKLE_MIN_INTERVAL = 15;    // fastest frames between a slot's pops, at the reference BPM
 let TWINKLE_MAX_INTERVAL = 50;    // slowest frames between a slot's pops, at the reference BPM
+let TWINKLE_BEAT_COUNT = 3;       // extra sparkles lit directly by each heartbeat, on top of the ambient ones
+let TWINKLE_BEAT_BRIGHTNESS = 255; // how bright those beat sparkles pop -- brighter than TWINKLE_PEAK so they stand out
 
 // Aurora tuning (design preview, not yet in theinterface.ino) — see
 // updateAurora()/auroraPixelColor(). A continuously animated, organic
@@ -977,6 +992,19 @@ function triggerBeat(state) {
       }
     }
   }
+  if (currentPattern === 8) {
+    // Sparkle: on top of the ambient BPM-paced twinkling updateTwinkle()
+    // already does, each heartbeat directly lights a few extra sparkles,
+    // brighter than the ambient peak so they read as the beat's own
+    // moment rather than blending into the background twinkle. Writes
+    // straight into twinkleBright/twinkleHue -- the same per-pixel decay
+    // in updateTwinkle() fades these out too, no separate state needed.
+    for (let n = 0; n < TWINKLE_BEAT_COUNT; n++) {
+      const idx = Math.floor(Math.random() * LED_COUNT);
+      state.twinkleBright[idx] = TWINKLE_BEAT_BRIGHTNESS;
+      state.twinkleHue[idx] = TWINKLE_HUE_MIN + Math.random() * (TWINKLE_HUE_MAX - TWINKLE_HUE_MIN);
+    }
+  }
 }
 
 // update() — beat pulse decay is shared by every pattern. No pattern's
@@ -1071,14 +1099,15 @@ function updateRainbowWave(state) {
 // Lava (design preview) — a classic fire-simulation heat-diffusion loop
 // (cool every LED a little at random, then blend each LED toward the one
 // behind it so heat drifts from the source, index 0, toward the far end)
-// rather than a moving light like the other three patterns. triggerBeat()
-// pumps a fresh burst of heat in at the source on every beat (see
-// LAVA_BEAT_BURST), so the flow visibly surges with each heartbeat, while
-// LAVA_SPARKING keeps a low random ember alight near the source between
-// beats so it never goes fully dark. lavaPixelColor() maps the resulting
-// heat (0-255) through a fixed black -> red -> orange -> yellow -> white
-// palette, same idea as the well-known Fire2012 effect, just flowing
-// along the strip instead of flickering in place.
+// rather than a moving light like the other three patterns. The heartbeat
+// is the *only* thing that adds heat: triggerBeat() pumps a fresh burst
+// of heat in at the source on every beat (see LAVA_BEAT_BURST), and
+// that's it -- no ambient random ignition, so a strip with no recent
+// beats cools all the way down to black and stays there, same as it
+// would if a participant's heart actually flatlined. lavaPixelColor()
+// maps the resulting heat (0-255) through a fixed black -> red -> orange
+// -> yellow -> white palette, same idea as the well-known Fire2012
+// effect, just flowing along the strip instead of flickering in place.
 //
 // Throttled to LAVA_UPDATE_MS instead of stepping every render frame
 // (LED_UPDATE_MS, 50fps) -- real lava is viscous, and advancing the sim at
@@ -1104,13 +1133,6 @@ function updateLava(state) {
   // to make heat propagate one direction per frame.
   for (let i = LED_COUNT - 1; i >= 2; i--) {
     state.heat[i] = (state.heat[i - 1] + state.heat[i - 1] + state.heat[i - 2]) / 3;
-  }
-
-  // Ambient ember near the source, independent of beats, so the flow
-  // keeps quietly simmering at rest.
-  if (Math.random() * 255 < LAVA_SPARKING) {
-    const idx = Math.floor(Math.random() * Math.min(3, LED_COUNT));
-    state.heat[idx] = Math.min(255, state.heat[idx] + Math.random() * 95 + 160);
   }
 }
 

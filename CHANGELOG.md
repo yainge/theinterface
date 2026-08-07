@@ -6,6 +6,7 @@ All notable changes to The Interface are documented here.
 
 ### Added
 
+- 10 selectable LED patterns (Red-Blue, Chase, Rainbow Wave, Lava, Eclipse, Rings, Plant, Slow Rainbow, Sparkle, Aurora), ported from the `LEDSimulator3D.html` design tool into `theinterface.ino`, cycled live on both strips by the A0 pushbutton (non-blocking debounce) with the active pattern name printed to Serial on each press. Eclipse, Plant, and Aurora each add a cross-strip "hearts in sync" reaction (BPM delta at/under a per-pattern threshold) on top of their own per-strip animation.
 - Two-participant serial heart-rate visualizer in `theinterface.ino`.
 - Per-participant runtime states: no contact, calibration, and tracking.
 - Per-participant automatic IR LED-current calibration with bounded gain and settling time.

@@ -13,10 +13,11 @@ const uint8_t LED_PIN_1 = 7;
 const uint8_t LED_PIN_2 = 12;
 const uint8_t LED_COUNT = 44;
 
-// Beat pulse color (RGB — Adafruit NeoPixel handles GRB byte reordering internally)
-const uint8_t BEAT_R = 220;
-const uint8_t BEAT_G = 60;
-const uint8_t BEAT_B = 0;
+// A0 button: cycles the LED pattern shown on both strips (see CLAUDE.md's
+// pin table). Active-LOW, INPUT_PULLUP -- same convention as
+// HardwareTest.ino's PIN_BUTTON, but debounced non-blockingly here since
+// loop() must keep servicing sensors/motors every iteration.
+const uint8_t PIN_BUTTON = A0;
 
 const uint8_t LED_AMBIENT_FLOOR = 3;   // minimum per-pixel brightness between beats
 const uint8_t LED_SPARKLE_PEAK = 60;   // peak brightness when a new sparkle fires
@@ -470,17 +471,175 @@ struct HeartChannel
 
 // ── LED rendering ─────────────────────────────────────────────────────────────
 //
-// Each strip has:
-//   - A per-pixel brightness array that decays slowly toward an ambient floor,
-//     with a handful of "sparkles" that pop up at random positions and fade out
-//     to create a twinkling baseline.
-//   - A beat pulse value (0-255) that jumps to full on each new detected beat
-//     and decays over ~420 ms, additively brightening all pixels.
+// 10 selectable patterns, ported 1:1 from the LEDSimulator3D.html design
+// tool (see that file for the original prototype + design commentary this
+// port follows). The A0 button cycles currentPattern for both strips at
+// once; each pattern owns its own per-pixel color math and (mostly) its
+// own state on LedState below.
 //
-// Timing: the strip is re-rendered at LED_UPDATE_MS (20 ms / 50 fps), which is
-// independent of the sensor FIFO poll rate (40 ms). NeoPixel show() disables
-// interrupts for ~1.3 ms (44 LEDs × 30 µs); SoftWire is purely software-timed
-// so they don't interfere — just keep show() out of the middle of readChannel().
+// Timing: each strip is re-rendered at LED_UPDATE_MS (20 ms / 50 fps),
+// independent of the sensor FIFO poll rate (40 ms). NeoPixel show()
+// disables interrupts for ~1.3 ms (44 LEDs × 30 µs); SoftWire is purely
+// software-timed so they don't interfere — just keep show() out of the
+// middle of readChannel().
+//
+// Float-only, same rule as the rest of this file (see the SPO2_RATIO_*
+// comment above and computeRMSSD()'s sqrtf): sinf/cosf/fmodf/fabsf, never
+// sin/cos/fmod/fabs, and TWO_PI_F below instead of Arduino's double PI/
+// TWO_PI macros, so the linker never has to pull in software double math.
+//
+// Timestamps (wave/eclipse/ring/flower/plant-fade-out start times) are
+// unsigned long millis(), never float: a float's 24-bit mantissa silently
+// loses millisecond precision past ~4.66 hours, which would corrupt every
+// elapsed-time calculation on a long-running installation. 0 means
+// "inactive", matching this file's existing motorTriggerTime==0 idiom.
+// Purely-cosmetic continuous-phase math (hue drift, breathing brightness)
+// instead wraps "now" via PHASE_WRAP_MS to stay float-precision-safe
+// forever without needing a timestamp at all.
+
+struct RGBf { float r, g, b; };
+
+// Forward declaration -- Arduino's auto-generated function prototypes get
+// inserted right before the first free function below (hsvToRgb()), which
+// is textually before the real LedState struct is defined further down.
+// Without this, every pattern function taking `LedState &` fails to
+// compile with "'LedState' was not declared in this scope" because the
+// auto-inserted prototype can't see it yet; an incomplete forward
+// declaration is enough for a reference/pointer parameter.
+struct LedState;
+
+const float TWO_PI_F = 6.283185307f;
+const unsigned long PHASE_WRAP_MS = 3600000UL; // 1 hour; an exact multiple of every
+                                                // periodic pattern's period below, so
+                                                // wrapping "now" through this never
+                                                // shifts phase, just keeps the float
+                                                // math in its exact-integer range.
+
+// hue: degrees (any range, wrapped), s/v: 0-1 -> r/g/b 0-255. Direct port
+// of LEDSimulator3D.html's hsvToRgb().
+RGBf hsvToRgb(float h, float s, float v)
+{
+    h = fmodf(h, 360.0f);
+    if (h < 0) h += 360.0f;
+    float c = v * s;
+    float x = c * (1.0f - fabsf(fmodf(h / 60.0f, 2.0f) - 1.0f));
+    float m = v - c;
+    float r = 0, g = 0, b = 0;
+    if      (h <  60.0f) { r = c; g = x; b = 0; }
+    else if (h < 120.0f) { r = x; g = c; b = 0; }
+    else if (h < 180.0f) { r = 0; g = c; b = x; }
+    else if (h < 240.0f) { r = 0; g = x; b = c; }
+    else if (h < 300.0f) { r = x; g = 0; b = c; }
+    else                 { r = c; g = 0; b = x; }
+    return { (r + m) * 255.0f, (g + m) * 255.0f, (b + m) * 255.0f };
+}
+
+float lerpf(float a, float b, float t) { return a + (b - a) * t; }
+
+// Clamp+cast a float 0-255 channel to a byte for strip.setPixelColor().
+uint8_t toByte(float v)
+{
+    if (v < 0) return 0;
+    if (v > 255) return 255;
+    return (uint8_t)v;
+}
+
+float randomFloat01() { return (float)random(0, 10001) / 10000.0f; }
+float randomHueInRange(float lo, float hi) { return lo + randomFloat01() * (hi - lo); }
+uint16_t bpmDelta(uint16_t a, uint16_t b) { return a > b ? a - b : b - a; }
+
+// Matches LEDSimulator3D.html's patNames order exactly.
+enum LedPattern : uint8_t
+{
+    PATTERN_RED_BLUE = 0, PATTERN_CHASE, PATTERN_RAINBOW_WAVE, PATTERN_LAVA,
+    PATTERN_ECLIPSE, PATTERN_RINGS, PATTERN_PLANT, PATTERN_SLOW_RAINBOW,
+    PATTERN_SPARKLE, PATTERN_AURORA, NUM_PATTERNS
+};
+const char *const patternNames[NUM_PATTERNS] = {
+    "Red-Blue", "Chase", "Rainbow Wave", "Lava", "Eclipse",
+    "Rings", "Plant", "Slow Rainbow", "Sparkle", "Aurora"
+};
+LedPattern currentPattern = PATTERN_RED_BLUE; // shared by both strips -- the button cycles this
+
+// Pattern 0 (Red-Blue): per-pixel hue within each strip's own theme range.
+const uint8_t SPARKLE_BEAT_COUNT = 14;
+const float SPARKLE_HUE_RANGE_1[2] = {0.0f, 35.0f};    // red -> orange (strip 1)
+const float SPARKLE_HUE_RANGE_2[2] = {210.0f, 285.0f}; // blue -> purple (strip 2)
+
+// Pattern 1 (Chase).
+const RGBf CHASE_COLOR = {255, 0, 0};
+const float CHASE_SPEED_PER_FRAME = 1.2f;
+const float CHASE_GLOW_PEAK = 80.0f;
+const float CHASE_GLOW_FALLOFF = 12.0f;
+
+// Pattern 2 (Rainbow Wave). WAVE_MAX_ACTIVE is a fixed-capacity stand-in
+// for the JS's unbounded waveStarts[] -- 8 concurrent waves is generous
+// against WAVE_TRAVEL_MS and realistic beat cadence; a beat landing with
+// every slot full is simply dropped.
+const uint16_t WAVE_TRAVEL_MS = 900;
+const uint8_t WAVE_TAIL_LEN = 10;
+const uint8_t WAVE_MAX_ACTIVE = 8;
+
+// Pattern 3 (Lava).
+const uint16_t LAVA_UPDATE_MS = 90;
+const float LAVA_COOLING = 120.0f;
+const uint8_t LAVA_BEAT_BURST = 4;
+
+// Pattern 4 (Eclipse).
+const uint16_t ECLIPSE_TRAVEL_MS = 1750;
+const uint8_t ECLIPSE_UMBRA_RADIUS = 6;
+const uint8_t ECLIPSE_CORONA_WIDTH = 4;
+const RGBf ECLIPSE_SUN_COLOR = {70, 90, 140};
+const RGBf ECLIPSE_CORONA_COLOR = {255, 255, 255};
+const RGBf ECLIPSE_SHADOW_COLOR = {0, 0, 0};
+const RGBf ECLIPSE_SYNC_SUN_COLOR = {230, 150, 30};
+const uint8_t ECLIPSE_SYNC_THRESHOLD = 4;
+const uint16_t ECLIPSE_SYNC_COLOR_MS = 3000;
+
+// Pattern 5 (Rings).
+const uint16_t RING_TRAVEL_MS = 700;
+const uint8_t RING_WIDTH = 6;
+const RGBf RING_COLOR = {255, 255, 255};
+
+// Pattern 6 (Plant).
+const uint8_t PLANT_MATURE_BRIGHTNESS = 150;
+const float PLANT_DECAY = 6.0f;
+const float PLANT_AGE_DECAY = 0.1f;
+const uint8_t PLANT_AGED_FLOOR = 25;
+const float PLANT_HUE_MIN = 95.0f, PLANT_HUE_MAX = 140.0f;
+const RGBf VIOLET_COLOR = {170, 60, 230};
+const uint8_t PLANT_SYNC_THRESHOLD = 4;
+const uint8_t PLANT_FLOWER_COUNT = 1;
+const uint16_t FLOWER_FADE_IN_MS = 300;
+const uint16_t FLOWER_HOLD_MS = 600;
+const uint16_t FLOWER_FADE_OUT_MS = 900;
+const uint16_t PLANT_FADEOUT_MS = 2000;
+
+// Pattern 7 (Slow Rainbow).
+const float SLOW_RAINBOW_HUE_SPEED = 20.0f;
+const uint16_t SLOW_RAINBOW_REFERENCE_BPM = 70;
+const uint16_t SLOW_RAINBOW_FADE_MS = 6000;
+const uint8_t SLOW_RAINBOW_MIN_BRIGHTNESS = 20;
+const uint8_t SLOW_RAINBOW_MAX_BRIGHTNESS = 180;
+const float SLOW_RAINBOW_BEAT_KICK = 150.0f;
+
+// Pattern 8 (Sparkle/Twinkle) -- separate from pattern 0's sparkle state.
+const float TWINKLE_HUE_MIN = 42.0f, TWINKLE_HUE_MAX = 58.0f;
+const uint8_t TWINKLE_PEAK = 80;
+const uint16_t TWINKLE_REFERENCE_BPM = 70;
+const float TWINKLE_MIN_INTERVAL = 15.0f;
+const float TWINKLE_MAX_INTERVAL = 50.0f;
+const uint8_t TWINKLE_BEAT_COUNT = 3;
+const uint8_t TWINKLE_BEAT_BRIGHTNESS = 255;
+
+// Pattern 9 (Aurora).
+const float AURORA_WAVE_SPEED = 0.3f;
+const uint8_t AURORA_BASE_BRIGHTNESS = 40;
+const uint16_t AURORA_INTENSITY_REFERENCE_BPM = 70;
+const uint8_t AURORA_SYNC_THRESHOLD = 4;
+const uint16_t AURORA_SYNC_COLOR_MS = 3000;
+const RGBf AURORA_SYNC_COLOR = {230, 60, 160};
+
 struct LedState
 {
     uint8_t pxBright[LED_COUNT];
@@ -492,6 +651,56 @@ struct LedState
 
     uint8_t sparklePos[NUM_SPARKLES];
     uint8_t sparkleTimer[NUM_SPARKLES]; // counts down; when 0, pick a new position
+
+    // Per-strip identity for patterns that "own" a floor tint (Rainbow
+    // Wave, Lava) instead of a full fixed palette -- replaces the old
+    // shared BEAT_R/G/B constant now that color varies by pattern. Set
+    // once in setup().
+    RGBf themeColor;
+
+    // Pattern 0 (Red-Blue).
+    float hue[LED_COUNT];
+    float hueLo, hueHi;
+
+    // Pattern 1 (Chase).
+    float chaseHead;
+
+    // Pattern 2 (Rainbow Wave). 0 = empty slot, else the beat's millis() start time.
+    unsigned long waveStart[WAVE_MAX_ACTIVE];
+
+    // Pattern 3 (Lava).
+    float heat[LED_COUNT];
+    unsigned long lastLavaUpdate;
+
+    // Pattern 4 (Eclipse). 0 = no shadow in flight.
+    unsigned long eclipseStart;
+
+    // Pattern 5 (Rings). 0 = no ring in flight.
+    unsigned long ringStart;
+
+    // Pattern 6 (Plant).
+    uint8_t plantLength;
+    float plantBright[LED_COUNT];
+    float plantHue[LED_COUNT];
+    unsigned long flowerStart[LED_COUNT]; // 0 = no bloom at this LED
+    float plantFadeOutFrom[LED_COUNT];
+    unsigned long plantFadeOutStart;      // 0 = not currently fading out
+
+    // Pattern 7 (Slow Rainbow).
+    float slowRainbowHue;
+
+    // Pattern 8 (Sparkle/Twinkle) -- own state, independent of pattern 0's
+    // sparklePos/sparkleTimer/hue above so the two tune separately.
+    uint8_t twinklePos[NUM_SPARKLES];
+    float twinkleTimer[NUM_SPARKLES]; // float, not uint8_t -- BPM-scaled fractional
+                                       // intervals can step straight over an integer 0
+                                       // and freeze that slot forever; see updateTwinkle().
+    float twinkleBright[LED_COUNT];
+    float twinkleHue[LED_COUNT];
+
+    // Pattern 9 (Aurora).
+    float auroraPhase;
+    float auroraIntensity;
 
     void begin()
     {
@@ -505,81 +714,700 @@ struct LedState
             sparklePos[i] = random(LED_COUNT);
             sparkleTimer[i] = random(10, 40);
         }
+
+        // Fields resetPattern() deliberately leaves alone -- seeded once
+        // here (after the caller sets hueLo/hueHi/themeColor) so a pattern
+        // switch away and back doesn't reset them.
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+            hue[i] = randomHueInRange(hueLo, hueHi);
+        for (uint8_t i = 0; i < NUM_SPARKLES; i++)
+        {
+            twinklePos[i] = random(LED_COUNT);
+            twinkleTimer[i] = random(10, 30);
+        }
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+        {
+            twinkleHue[i] = randomHueInRange(TWINKLE_HUE_MIN, TWINKLE_HUE_MAX);
+            plantHue[i] = PLANT_HUE_MIN;
+        }
+        slowRainbowHue = 0;
+        auroraPhase = (float)random(0, 1000); // random offset so both strips' curtains don't move in lockstep
+        auroraIntensity = 1;
+
+        resetPattern();
     }
 
-    // Call once per loop() — detects a newly set beatFlashUntil and arms the pulse.
-    // On beat: flood all pixels to full brightness so the flash is impossible to miss.
-    void checkBeat(unsigned long beatFlashUntil)
+    // Mirrors LEDSimulator3D.html's setPattern() reset block exactly --
+    // called from begin() and on every button-triggered pattern change.
+    // Deliberately does NOT reset hue[]/sparklePos/sparkleTimer/twinklePos/
+    // twinkleTimer/twinkleHue/plantHue/slowRainbowHue/auroraPhase/
+    // auroraIntensity -- e.g. Aurora's per-strip phase offset must survive
+    // switching away and back.
+    void resetPattern()
+    {
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+            pxBright[i] = LED_AMBIENT_FLOOR;
+        beatPulse = 0;
+        chaseHead = 0;
+        for (uint8_t i = 0; i < WAVE_MAX_ACTIVE; i++)
+            waveStart[i] = 0;
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+            heat[i] = 0;
+        eclipseStart = 0;
+        ringStart = 0;
+        plantLength = 0;
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+            plantBright[i] = LED_AMBIENT_FLOOR;
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+            flowerStart[i] = 0;
+        plantFadeOutStart = 0;
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+            twinkleBright[i] = LED_AMBIENT_FLOOR;
+    }
+
+    // Call once per loop() — detects a newly set beatFlashUntil and
+    // dispatches this pattern's own beat reaction (reactToBeat(), defined
+    // below once the per-pattern functions it calls are all in scope).
+    void checkBeat(unsigned long beatFlashUntil, uint16_t myBpm, uint16_t otherBpm)
     {
         if (beatFlashUntil != lastBeatFlash && beatFlashUntil > millis())
         {
             beatPulse = 255;
-            for (uint8_t i = 0; i < LED_COUNT; i++)
-                pxBright[i] = 255;
+            reactToBeat(myBpm, otherBpm);
             lastBeatFlash = beatFlashUntil;
         }
     }
 
     bool needsUpdate() const { return millis() - lastUpdate >= LED_UPDATE_MS; }
 
-    void update(Adafruit_NeoPixel &strip)
+    void update(Adafruit_NeoPixel &strip, uint16_t myBpm, uint16_t otherBpm)
     {
         lastUpdate = millis();
 
-        // Decay the beat pulse
         if (beatPulse > LED_BEAT_DECAY)
             beatPulse -= LED_BEAT_DECAY;
         else
             beatPulse = 0;
 
-        // Decay per-pixel brightness toward the ambient floor
+        updatePattern(myBpm, otherBpm);
+
         for (uint8_t i = 0; i < LED_COUNT; i++)
         {
-            if (pxBright[i] > LED_AMBIENT_FLOOR + LED_PIXEL_DECAY)
-                pxBright[i] -= LED_PIXEL_DECAY;
-            else
-                pxBright[i] = LED_AMBIENT_FLOOR;
-        }
-
-        // Advance sparkles only when the beat pulse has fully faded — keeps the
-        // flash clean (no new sparkles popping during the bright decay window).
-        if (beatPulse == 0)
-        {
-            for (uint8_t i = 0; i < NUM_SPARKLES; i++)
-            {
-                if (sparkleTimer[i] == 0)
-                {
-                    sparklePos[i] = random(LED_COUNT);
-                    pxBright[sparklePos[i]] = random(LED_SPARKLE_PEAK / 2, LED_SPARKLE_PEAK);
-                    sparkleTimer[i] = random(15, 50);
-                }
-                else
-                {
-                    sparkleTimer[i]--;
-                }
-            }
-        }
-
-        // Write pixels: ambient sparkle brightness + additive beat pulse, clamped to 255
-        for (uint8_t i = 0; i < LED_COUNT; i++)
-        {
-            uint16_t b = (uint16_t)pxBright[i] + beatPulse;
-            if (b > 255) b = 255;
-            uint8_t bv = (uint8_t)b;
-            strip.setPixelColor(i, strip.Color(
-                (uint8_t)((uint16_t)BEAT_R * bv / 255),
-                (uint8_t)((uint16_t)BEAT_G * bv / 255),
-                (uint8_t)((uint16_t)BEAT_B * bv / 255)
-            ));
+            RGBf c = getPixelColor(i);
+            strip.setPixelColor(i, strip.Color(toByte(c.r), toByte(c.g), toByte(c.b)));
         }
         strip.show();
     }
+
+    // Defined out-of-line below, after the per-pattern update/color
+    // functions they dispatch to (C++ allows this: a class's own member
+    // function bodies can reference other members declared later in the
+    // same class).
+    void updatePattern(uint16_t myBpm, uint16_t otherBpm);
+    RGBf getPixelColor(uint8_t i) const;
+    void reactToBeat(uint16_t myBpm, uint16_t otherBpm);
 };
 
 Adafruit_NeoPixel strip1(LED_COUNT, LED_PIN_1, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel strip2(LED_COUNT, LED_PIN_2, NEO_GRB + NEO_KHZ800);
 
 LedState leds1, leds2;
+
+// ── Per-pattern update/color functions ──────────────────────────────────────
+// One update + one pixel-color function per pattern, named 1:1 from
+// LEDSimulator3D.html so the port is traceable line-for-line against it.
+
+// Pattern 0: Red-Blue.
+void updateSparkle(LedState &state)
+{
+    for (uint8_t i = 0; i < LED_COUNT; i++)
+    {
+        if (state.pxBright[i] > LED_AMBIENT_FLOOR + LED_PIXEL_DECAY)
+            state.pxBright[i] -= LED_PIXEL_DECAY;
+        else
+            state.pxBright[i] = LED_AMBIENT_FLOOR;
+    }
+    // Ambient twinkles pause while a beat is still in flight, so new random
+    // pops don't visually compete with the beat's own random assortment.
+    if (state.beatPulse == 0)
+    {
+        for (uint8_t i = 0; i < NUM_SPARKLES; i++)
+        {
+            if (state.sparkleTimer[i] == 0)
+            {
+                uint8_t idx = random(LED_COUNT);
+                state.sparklePos[i] = idx;
+                state.pxBright[idx] = random(LED_SPARKLE_PEAK / 2, LED_SPARKLE_PEAK);
+                state.hue[idx] = randomHueInRange(state.hueLo, state.hueHi);
+                state.sparkleTimer[i] = random(15, 50);
+            }
+            else
+            {
+                state.sparkleTimer[i]--;
+            }
+        }
+    }
+}
+
+RGBf sparklePixelColor(const LedState &state, uint8_t i)
+{
+    return hsvToRgb(state.hue[i], 1.0f, state.pxBright[i] / 255.0f);
+}
+
+// Pattern 1: Chase.
+void updateChase(LedState &state)
+{
+    if (state.chaseHead < LED_COUNT)
+        state.chaseHead += CHASE_SPEED_PER_FRAME;
+}
+
+RGBf chasePixelColor(const LedState &state, uint8_t i)
+{
+    float dist = fabsf((float)i - state.chaseHead);
+    float glow = max(0.0f, CHASE_GLOW_PEAK - dist * CHASE_GLOW_FALLOFF);
+    float b = min(255.0f, glow + LED_AMBIENT_FLOOR);
+    return { CHASE_COLOR.r * b / 255.0f, CHASE_COLOR.g * b / 255.0f, CHASE_COLOR.b * b / 255.0f };
+}
+
+// Pattern 2: Rainbow Wave. Each beat launches its own wavefront at index 0
+// that sweeps to LED_COUNT-1 over WAVE_TRAVEL_MS, towing a short rainbow
+// tail; multiple beats' waves can be in flight at once (see waveStart[]
+// above). hueShift is a pure function of "now" (via PHASE_WRAP_MS), so it's
+// computed inline here rather than cached per-strip.
+void updateRainbowWave(LedState &state)
+{
+    for (uint8_t k = 0; k < WAVE_MAX_ACTIVE; k++)
+    {
+        if (state.waveStart[k] == 0) continue;
+        unsigned long elapsed = state.lastUpdate - state.waveStart[k];
+        float front = ((float)elapsed / WAVE_TRAVEL_MS) * (LED_COUNT - 1);
+        if (front >= (float)(LED_COUNT - 1) + WAVE_TAIL_LEN)
+            state.waveStart[k] = 0; // this wave's tail has fully cleared the strip
+    }
+}
+
+RGBf rainbowPixelColor(const LedState &state, uint8_t i)
+{
+    float r = state.themeColor.r * LED_AMBIENT_FLOOR / 255.0f;
+    float g = state.themeColor.g * LED_AMBIENT_FLOOR / 255.0f;
+    float b = state.themeColor.b * LED_AMBIENT_FLOOR / 255.0f;
+
+    float nowPhase = (float)(state.lastUpdate % PHASE_WRAP_MS);
+    float hueShift = fmodf(nowPhase * 0.05f, 360.0f);
+
+    for (uint8_t k = 0; k < WAVE_MAX_ACTIVE; k++)
+    {
+        if (state.waveStart[k] == 0) continue;
+        unsigned long elapsed = state.lastUpdate - state.waveStart[k];
+        float front = ((float)elapsed / WAVE_TRAVEL_MS) * (LED_COUNT - 1);
+        float dist = front - i;
+        if (dist >= 0 && dist < WAVE_TAIL_LEN)
+        {
+            float brightness = 1.0f - dist / WAVE_TAIL_LEN;
+            float hue = fmodf((dist / WAVE_TAIL_LEN) * 360.0f + hueShift, 360.0f);
+            RGBf c = hsvToRgb(hue, 1.0f, brightness);
+            r = max(r, c.r); g = max(g, c.g); b = max(b, c.b);
+        }
+    }
+    return { r, g, b };
+}
+
+// Pattern 3: Lava. Fixed black -> red -> orange -> yellow -> white palette
+// driven by heat (0-255); a classic fire-sim heat-diffusion loop. Each beat
+// is the only heat source (see reactToBeat()) -- no ambient random
+// ignition, so a strip with no recent beats cools to black and stays
+// there. Throttled to LAVA_UPDATE_MS so the flow reads as slow-moving
+// rather than a fast flicker; rendering still runs every frame.
+RGBf lavaColor(float heat)
+{
+    float t = min(1.0f, heat / 255.0f);
+    float hue = 8.0f + t * 42.0f;
+    float sat = t < 0.85f ? 1.0f : 1.0f - (t - 0.85f) / 0.15f * 0.6f;
+    float val = min(1.0f, t * 1.3f);
+    return hsvToRgb(hue, sat, val);
+}
+
+void updateLava(LedState &state)
+{
+    if (state.lastUpdate - state.lastLavaUpdate < LAVA_UPDATE_MS)
+        return;
+    state.lastLavaUpdate = state.lastUpdate;
+
+    for (uint8_t i = 0; i < LED_COUNT; i++)
+    {
+        float cooldown = randomFloat01() * ((LAVA_COOLING * 10.0f) / LED_COUNT);
+        state.heat[i] = max(0.0f, state.heat[i] - cooldown);
+    }
+    // Heat drifts from the source (index 0) toward the far end: walk from
+    // the far end down to the source so each LED blends toward values that
+    // still hold last frame's state (same trick Fire2012 uses).
+    for (uint8_t i = LED_COUNT - 1; i >= 2; i--)
+        state.heat[i] = (state.heat[i - 1] + state.heat[i - 1] + state.heat[i - 2]) / 3.0f;
+}
+
+RGBf lavaPixelColor(const LedState &state, uint8_t i)
+{
+    float floorR = state.themeColor.r * LED_AMBIENT_FLOOR / 255.0f;
+    float floorG = state.themeColor.g * LED_AMBIENT_FLOOR / 255.0f;
+    float floorB = state.themeColor.b * LED_AMBIENT_FLOOR / 255.0f;
+    RGBf c = lavaColor(state.heat[i]);
+    return { max(floorR, c.r), max(floorG, c.g), max(floorB, c.b) };
+}
+
+// Pattern 4: Eclipse. Idles at full brightness (a hazy sun); each beat
+// launches a shadow disc whose center sweeps index 0 -> LED_COUNT-1 over
+// ECLIPSE_TRAVEL_MS. The sun's own color slowly shifts toward orange while
+// the two hearts are in sync (see updateSharedPatternState()'s
+// eclipseSunColorNow).
+void updateEclipse(LedState &state)
+{
+    if (state.eclipseStart == 0) return;
+    unsigned long elapsed = state.lastUpdate - state.eclipseStart;
+    if (elapsed >= ECLIPSE_TRAVEL_MS)
+        state.eclipseStart = 0; // settle back to full sun until next beat
+}
+
+RGBf eclipsePixelColor(const LedState &state, uint8_t i)
+{
+    extern RGBf eclipseSunColorNow;
+    float r = eclipseSunColorNow.r, g = eclipseSunColorNow.g, b = eclipseSunColorNow.b;
+
+    if (state.eclipseStart != 0)
+    {
+        unsigned long elapsed = state.lastUpdate - state.eclipseStart;
+        if (elapsed < ECLIPSE_TRAVEL_MS)
+        {
+            float pos = ((float)elapsed / ECLIPSE_TRAVEL_MS) * (LED_COUNT - 1);
+            float dist = fabsf((float)i - pos);
+            if (dist < ECLIPSE_UMBRA_RADIUS)
+            {
+                float t = dist / ECLIPSE_UMBRA_RADIUS;
+                float k = t * t;
+                r = lerpf(ECLIPSE_SHADOW_COLOR.r, eclipseSunColorNow.r, k);
+                g = lerpf(ECLIPSE_SHADOW_COLOR.g, eclipseSunColorNow.g, k);
+                b = lerpf(ECLIPSE_SHADOW_COLOR.b, eclipseSunColorNow.b, k);
+            }
+            else if (dist < ECLIPSE_UMBRA_RADIUS + ECLIPSE_CORONA_WIDTH)
+            {
+                float coronaT = 1.0f - (dist - ECLIPSE_UMBRA_RADIUS) / ECLIPSE_CORONA_WIDTH;
+                r = lerpf(r, ECLIPSE_CORONA_COLOR.r, coronaT);
+                g = lerpf(g, ECLIPSE_CORONA_COLOR.g, coronaT);
+                b = lerpf(b, ECLIPSE_CORONA_COLOR.b, coronaT);
+            }
+        }
+    }
+    return { r, g, b };
+}
+
+// Pattern 5: Rings. Each beat sends a symmetric ring of light out from
+// index 0, front sweeping to LED_COUNT-1 over RING_TRAVEL_MS -- fades on
+// both its leading and trailing edge, unlike Rainbow Wave/Lava's one-sided tail.
+void updateRings(LedState &state)
+{
+    if (state.ringStart == 0) return;
+    unsigned long elapsed = state.lastUpdate - state.ringStart;
+    if (elapsed >= RING_TRAVEL_MS)
+        state.ringStart = 0;
+}
+
+RGBf ringsPixelColor(const LedState &state, uint8_t i)
+{
+    float r = RING_COLOR.r * LED_AMBIENT_FLOOR / 255.0f;
+    float g = RING_COLOR.g * LED_AMBIENT_FLOOR / 255.0f;
+    float b = RING_COLOR.b * LED_AMBIENT_FLOOR / 255.0f;
+
+    if (state.ringStart != 0)
+    {
+        unsigned long elapsed = state.lastUpdate - state.ringStart;
+        if (elapsed < RING_TRAVEL_MS)
+        {
+            float front = ((float)elapsed / RING_TRAVEL_MS) * (LED_COUNT - 1);
+            float dist = fabsf((float)i - front);
+            if (dist < RING_WIDTH)
+            {
+                float t = 1.0f - dist / RING_WIDTH;
+                r = lerpf(r, RING_COLOR.r, t);
+                g = lerpf(g, RING_COLOR.g, t);
+                b = lerpf(b, RING_COLOR.b, t);
+            }
+        }
+    }
+    return { r, g, b };
+}
+
+// Pattern 6: Plant. Growth is cumulative across beats (see reactToBeat()),
+// not a transient event -- each beat adds one more grown LED from index 0
+// (the "roots") toward LED_COUNT-1. Brightness has two decay phases: a
+// fast initial shimmer settle down to PLANT_MATURE_BRIGHTNESS, then a slow
+// continuous aging dim down to PLANT_AGED_FLOOR that never stops. Violet
+// flowers bloom on the grown stem whenever the two hearts are in sync
+// (reactToBeat()), each with its own fade-in/hold/fade-out envelope
+// recomputed inline here from flowerStart[i] + lastUpdate. Once fully
+// grown, the whole strip eases down to LED_AMBIENT_FLOOR before a fresh
+// plant starts.
+void updatePlant(LedState &state)
+{
+    for (uint8_t i = 0; i < state.plantLength; i++)
+    {
+        if (state.plantBright[i] > PLANT_MATURE_BRIGHTNESS)
+            state.plantBright[i] = max((float)PLANT_MATURE_BRIGHTNESS, state.plantBright[i] - PLANT_DECAY);
+        else if (state.plantBright[i] > PLANT_AGED_FLOOR)
+            state.plantBright[i] = max((float)PLANT_AGED_FLOOR, state.plantBright[i] - PLANT_AGE_DECAY);
+    }
+
+    for (uint8_t i = 0; i < LED_COUNT; i++)
+    {
+        if (state.flowerStart[i] == 0) continue;
+        unsigned long elapsed = state.lastUpdate - state.flowerStart[i];
+        if (elapsed >= (unsigned long)FLOWER_FADE_IN_MS + FLOWER_HOLD_MS + FLOWER_FADE_OUT_MS)
+            state.flowerStart[i] = 0; // envelope finished
+    }
+
+    if (state.plantLength >= LED_COUNT)
+    {
+        if (state.plantFadeOutStart == 0)
+        {
+            state.plantFadeOutStart = state.lastUpdate;
+            for (uint8_t i = 0; i < LED_COUNT; i++)
+                state.plantFadeOutFrom[i] = state.plantBright[i]; // snapshot -- fade from here
+        }
+        unsigned long elapsed = state.lastUpdate - state.plantFadeOutStart;
+        float t = min(1.0f, (float)elapsed / PLANT_FADEOUT_MS);
+        for (uint8_t i = 0; i < LED_COUNT; i++)
+            state.plantBright[i] = lerpf(state.plantFadeOutFrom[i], LED_AMBIENT_FLOOR, t);
+
+        if (t >= 1.0f)
+        {
+            state.plantLength = 0;
+            for (uint8_t i = 0; i < LED_COUNT; i++)
+                state.plantBright[i] = LED_AMBIENT_FLOOR;
+            for (uint8_t i = 0; i < LED_COUNT; i++)
+                state.flowerStart[i] = 0;
+            state.plantFadeOutStart = 0; // ready to grow a fresh plant on the next beat
+        }
+    }
+}
+
+RGBf plantPixelColor(const LedState &state, uint8_t i)
+{
+    float bright = (i < state.plantLength) ? state.plantBright[i] : LED_AMBIENT_FLOOR;
+    RGBf c = hsvToRgb(state.plantHue[i], 1.0f, bright / 255.0f);
+
+    float r = c.r, g = c.g, b = c.b;
+    if (state.flowerStart[i] != 0)
+    {
+        unsigned long elapsed = state.lastUpdate - state.flowerStart[i];
+        float flower = 0;
+        if (elapsed < FLOWER_FADE_IN_MS)
+            flower = 255.0f * ((float)elapsed / FLOWER_FADE_IN_MS);
+        else if (elapsed < (unsigned long)FLOWER_FADE_IN_MS + FLOWER_HOLD_MS)
+            flower = 255.0f;
+        else if (elapsed < (unsigned long)FLOWER_FADE_IN_MS + FLOWER_HOLD_MS + FLOWER_FADE_OUT_MS)
+        {
+            unsigned long fadeElapsed = elapsed - FLOWER_FADE_IN_MS - FLOWER_HOLD_MS;
+            flower = 255.0f * (1.0f - (float)fadeElapsed / FLOWER_FADE_OUT_MS);
+        }
+        if (flower > 0)
+        {
+            float t = flower / 255.0f;
+            r = lerpf(r, VIOLET_COLOR.r, t);
+            g = lerpf(g, VIOLET_COLOR.g, t);
+            b = lerpf(b, VIOLET_COLOR.b, t);
+        }
+    }
+    return { r, g, b };
+}
+
+// Pattern 7: Slow Rainbow. A continuously flowing ambient rainbow gradient
+// (spatial hue by position) with a slow brightness "breathing" cycle,
+// running regardless of beats. slowRainbowHue is a running accumulator
+// (speed depends on avgBpm and gets a kick from beatPulse) rather than a
+// function of absolute time, so it never jumps when either changes;
+// breathe uses PHASE_WRAP_MS since its period is a fixed constant.
+void updateSlowRainbow(LedState &state, uint16_t avgBpm)
+{
+    float baseSpeed = SLOW_RAINBOW_HUE_SPEED * ((float)avgBpm / SLOW_RAINBOW_REFERENCE_BPM);
+    float kick = ((float)state.beatPulse / 255.0f) * SLOW_RAINBOW_BEAT_KICK;
+    state.slowRainbowHue = fmodf(state.slowRainbowHue + (baseSpeed + kick) * LED_UPDATE_MS / 1000.0f, 360.0f);
+}
+
+RGBf slowRainbowPixelColor(const LedState &state, uint8_t i)
+{
+    float nowPhase = (float)(state.lastUpdate % PHASE_WRAP_MS);
+    float breathe = (sinf((nowPhase / SLOW_RAINBOW_FADE_MS) * TWO_PI_F) + 1.0f) / 2.0f;
+    float brightness = SLOW_RAINBOW_MIN_BRIGHTNESS + breathe * (SLOW_RAINBOW_MAX_BRIGHTNESS - SLOW_RAINBOW_MIN_BRIGHTNESS);
+    float hue = fmodf(state.slowRainbowHue + ((float)i / LED_COUNT) * 360.0f, 360.0f);
+    return hsvToRgb(hue, 1.0f, brightness / 255.0f);
+}
+
+// Pattern 8: Sparkle/Twinkle. Warm gold ambient twinkle whose ambient pop
+// *rate* (not a beat-triggered burst) responds to this strip's own BPM --
+// see reactToBeat() for the extra beat-triggered sparkles on top.
+void updateTwinkle(LedState &state, uint16_t myBpm)
+{
+    for (uint8_t i = 0; i < LED_COUNT; i++)
+    {
+        if (state.twinkleBright[i] > LED_AMBIENT_FLOOR + LED_PIXEL_DECAY)
+            state.twinkleBright[i] -= LED_PIXEL_DECAY;
+        else
+            state.twinkleBright[i] = LED_AMBIENT_FLOOR;
+    }
+
+    float rateScale = (float)TWINKLE_REFERENCE_BPM / max((uint16_t)1, myBpm); // guards divide-by-zero pre-tracking
+    float minInterval = max(2.0f, TWINKLE_MIN_INTERVAL * rateScale);
+    float maxInterval = max(minInterval + 1.0f, TWINKLE_MAX_INTERVAL * rateScale);
+
+    for (uint8_t i = 0; i < NUM_SPARKLES; i++)
+    {
+        if (state.twinkleTimer[i] <= 0.0f)
+        {
+            uint8_t idx = random(LED_COUNT);
+            state.twinklePos[i] = idx;
+            state.twinkleBright[idx] = random(TWINKLE_PEAK / 2, TWINKLE_PEAK);
+            state.twinkleHue[idx] = randomHueInRange(TWINKLE_HUE_MIN, TWINKLE_HUE_MAX);
+            state.twinkleTimer[i] = minInterval + randomFloat01() * (maxInterval - minInterval);
+        }
+        else
+        {
+            state.twinkleTimer[i] -= 1.0f;
+        }
+    }
+}
+
+RGBf twinklePixelColor(const LedState &state, uint8_t i)
+{
+    return hsvToRgb(state.twinkleHue[i], 1.0f, state.twinkleBright[i] / 255.0f);
+}
+
+// Pattern 9: Aurora. Three overlapping sine layers at different spatial
+// frequencies/phase speeds combine into an organic drifting "curtain".
+// This strip's own BPM scales its curtain's intensity; a shared pink
+// shimmer (auroraSyncT, see updateSharedPatternState()) fades in wherever
+// the curtain is already bright when the two hearts are in sync.
+void updateAurora(LedState &state, uint16_t myBpm)
+{
+    state.auroraPhase += AURORA_WAVE_SPEED * (LED_UPDATE_MS / 1000.0f);
+    float ratio = (float)myBpm / AURORA_INTENSITY_REFERENCE_BPM;
+    state.auroraIntensity = max(0.3f, min(2.0f, ratio));
+}
+
+RGBf auroraPixelColor(const LedState &state, uint8_t i)
+{
+    extern float auroraSyncT;
+    float t = (float)i / (LED_COUNT - 1);
+    float w1 = sinf(t * TWO_PI_F * 1.3f + state.auroraPhase);
+    float w2 = sinf(t * TWO_PI_F * 2.7f + state.auroraPhase * 0.6f + 2.1f);
+    float w3 = sinf(t * TWO_PI_F * 4.1f + state.auroraPhase * 1.4f + 4.7f);
+    float wave = (w1 + w2 * 0.6f + w3 * 0.4f) / 2.0f;
+    float curtain = max(0.0f, wave);
+
+    float brightness = min(255.0f, (AURORA_BASE_BRIGHTNESS + curtain * 180.0f) * state.auroraIntensity);
+    float hue = 100.0f + (1.0f - curtain) * 70.0f;
+
+    float lowBias = max(0.0f, 1.0f - t / 0.35f);
+    float lowHue = 210.0f + lowBias * 65.0f;
+    hue = lerpf(hue, lowHue, lowBias);
+
+    float highBias = max(0.0f, (t - 0.85f) / 0.15f);
+    hue = lerpf(hue, 355.0f, highBias);
+
+    RGBf c = hsvToRgb(hue, 0.85f, brightness / 255.0f);
+    float r = c.r, g = c.g, b = c.b;
+
+    if (auroraSyncT > 0)
+    {
+        float pinkT = auroraSyncT * curtain;
+        r = lerpf(r, AURORA_SYNC_COLOR.r, pinkT);
+        g = lerpf(g, AURORA_SYNC_COLOR.g, pinkT);
+        b = lerpf(b, AURORA_SYNC_COLOR.b, pinkT);
+    }
+    return { r, g, b };
+}
+
+// ── Shared (not per-strip) pattern state ────────────────────────────────────
+// Eclipse's sun color and Aurora's pink shimmer are properties of *both*
+// hearts together, not either strip alone -- advanced once per loop() at
+// LED_UPDATE_MS cadence (their increment math assumes exactly that), not
+// once per raw loop() iteration.
+float eclipseSyncT = 0;             // 0 = fully blue, 1 = fully orange-yellow
+RGBf eclipseSunColorNow = ECLIPSE_SUN_COLOR;
+float auroraSyncT = 0;              // 0 = no shimmer, 1 = full shimmer
+unsigned long lastSharedLedUpdate = 0;
+
+// Direct port of updateEclipseSyncColor()/updateAuroraSyncColor() from
+// LEDSimulator3D.html.
+void updateSharedPatternState(uint16_t bpm1, uint16_t bpm2)
+{
+    float step;
+
+    bool eclipseSynced = bpmDelta(bpm1, bpm2) <= ECLIPSE_SYNC_THRESHOLD;
+    step = (float)LED_UPDATE_MS / ECLIPSE_SYNC_COLOR_MS;
+    eclipseSyncT = eclipseSynced ? min(1.0f, eclipseSyncT + step) : max(0.0f, eclipseSyncT - step);
+    eclipseSunColorNow.r = lerpf(ECLIPSE_SUN_COLOR.r, ECLIPSE_SYNC_SUN_COLOR.r, eclipseSyncT);
+    eclipseSunColorNow.g = lerpf(ECLIPSE_SUN_COLOR.g, ECLIPSE_SYNC_SUN_COLOR.g, eclipseSyncT);
+    eclipseSunColorNow.b = lerpf(ECLIPSE_SUN_COLOR.b, ECLIPSE_SYNC_SUN_COLOR.b, eclipseSyncT);
+
+    bool auroraSynced = bpmDelta(bpm1, bpm2) <= AURORA_SYNC_THRESHOLD;
+    step = (float)LED_UPDATE_MS / AURORA_SYNC_COLOR_MS;
+    auroraSyncT = auroraSynced ? min(1.0f, auroraSyncT + step) : max(0.0f, auroraSyncT - step);
+}
+
+// ── LedState dispatch methods ────────────────────────────────────────────
+// Out-of-line now that every per-pattern update/color function above is in scope.
+void LedState::updatePattern(uint16_t myBpm, uint16_t otherBpm)
+{
+    switch (currentPattern)
+    {
+    case PATTERN_RED_BLUE:     updateSparkle(*this); break;
+    case PATTERN_CHASE:        updateChase(*this); break;
+    case PATTERN_RAINBOW_WAVE: updateRainbowWave(*this); break;
+    case PATTERN_LAVA:         updateLava(*this); break;
+    case PATTERN_ECLIPSE:      updateEclipse(*this); break;
+    case PATTERN_RINGS:        updateRings(*this); break;
+    case PATTERN_PLANT:        updatePlant(*this); break;
+    case PATTERN_SLOW_RAINBOW: updateSlowRainbow(*this, (uint16_t)(((uint32_t)myBpm + otherBpm) / 2)); break;
+    case PATTERN_SPARKLE:      updateTwinkle(*this, myBpm); break;
+    case PATTERN_AURORA:       updateAurora(*this, myBpm); break;
+    default: break;
+    }
+}
+
+RGBf LedState::getPixelColor(uint8_t i) const
+{
+    switch (currentPattern)
+    {
+    case PATTERN_CHASE:        return chasePixelColor(*this, i);
+    case PATTERN_RAINBOW_WAVE: return rainbowPixelColor(*this, i);
+    case PATTERN_LAVA:         return lavaPixelColor(*this, i);
+    case PATTERN_ECLIPSE:      return eclipsePixelColor(*this, i);
+    case PATTERN_RINGS:        return ringsPixelColor(*this, i);
+    case PATTERN_PLANT:        return plantPixelColor(*this, i);
+    case PATTERN_SLOW_RAINBOW: return slowRainbowPixelColor(*this, i);
+    case PATTERN_SPARKLE:      return twinklePixelColor(*this, i);
+    case PATTERN_AURORA:       return auroraPixelColor(*this, i);
+    default:                   return sparklePixelColor(*this, i); // PATTERN_RED_BLUE
+    }
+}
+
+// Direct port of triggerBeat() from LEDSimulator3D.html -- each pattern's
+// own reaction to a freshly detected beat. Patterns 7 (Slow Rainbow) and 9
+// (Aurora) do nothing beyond the beatPulse=255 checkBeat() already set --
+// they're ambient-only, driven by their own continuous update function.
+void LedState::reactToBeat(uint16_t myBpm, uint16_t otherBpm)
+{
+    unsigned long now = millis();
+    switch (currentPattern)
+    {
+    case PATTERN_RED_BLUE:
+        for (uint8_t n = 0; n < SPARKLE_BEAT_COUNT; n++)
+        {
+            uint8_t idx = random(LED_COUNT);
+            pxBright[idx] = 255;
+            hue[idx] = randomHueInRange(hueLo, hueHi);
+        }
+        break;
+
+    case PATTERN_CHASE:
+        chaseHead = 0;
+        break;
+
+    case PATTERN_RAINBOW_WAVE:
+        for (uint8_t k = 0; k < WAVE_MAX_ACTIVE; k++)
+        {
+            if (waveStart[k] == 0)
+            {
+                waveStart[k] = now;
+                break; // one free slot claimed; if none free, this beat's wave is dropped
+            }
+        }
+        break;
+
+    case PATTERN_LAVA:
+        for (uint8_t k = 0; k < LAVA_BEAT_BURST && k < LED_COUNT; k++)
+            heat[k] = 255;
+        break;
+
+    case PATTERN_ECLIPSE:
+        if (eclipseStart == 0)
+            eclipseStart = now; // only launch a fresh shadow if the last one already finished
+        break;
+
+    case PATTERN_RINGS:
+        ringStart = now;
+        break;
+
+    case PATTERN_PLANT:
+        if (plantLength < LED_COUNT)
+        {
+            uint8_t idx = plantLength;
+            plantHue[idx] = randomHueInRange(PLANT_HUE_MIN, PLANT_HUE_MAX);
+            plantBright[idx] = 255;
+            plantLength++;
+        }
+        if (plantLength > 1 && bpmDelta(myBpm, otherBpm) <= PLANT_SYNC_THRESHOLD)
+        {
+            for (uint8_t f = 0; f < PLANT_FLOWER_COUNT; f++)
+            {
+                uint8_t idx = random(plantLength - 1); // never the growth tip
+                flowerStart[idx] = now;
+            }
+        }
+        break;
+
+    case PATTERN_SPARKLE:
+        for (uint8_t n = 0; n < TWINKLE_BEAT_COUNT; n++)
+        {
+            uint8_t idx = random(LED_COUNT);
+            twinkleBright[idx] = TWINKLE_BEAT_BRIGHTNESS;
+            twinkleHue[idx] = randomHueInRange(TWINKLE_HUE_MIN, TWINKLE_HUE_MAX);
+        }
+        break;
+
+    default:
+        break; // PATTERN_SLOW_RAINBOW / PATTERN_AURORA: no beat reaction beyond beatPulse=255
+    }
+}
+
+// ── A0 button: cycles the LED pattern ───────────────────────────────────────
+const uint16_t BUTTON_DEBOUNCE_MS = 30;
+bool buttonLastRaw = HIGH;       // HIGH = released (INPUT_PULLUP, active-LOW)
+bool buttonStableState = HIGH;
+unsigned long buttonLastChangeMs = 0;
+
+void cyclePattern();
+
+// Non-blocking debounce: track the last raw level change, commit a new
+// stable state only after it's held for BUTTON_DEBOUNCE_MS. Unlike
+// HardwareTest.ino's testButton() (blocking, while(digitalRead())), loop()
+// here must keep servicing sensors/motors every iteration -- same
+// millis()-driven idiom as HeartChannel::updateMotorSchedule().
+void pollButton()
+{
+    bool raw = digitalRead(PIN_BUTTON);
+    if (raw != buttonLastRaw)
+    {
+        buttonLastChangeMs = millis();
+        buttonLastRaw = raw;
+    }
+    if (millis() - buttonLastChangeMs >= BUTTON_DEBOUNCE_MS && raw != buttonStableState)
+    {
+        buttonStableState = raw;
+        if (buttonStableState == LOW) // falling edge = press
+            cyclePattern();
+    }
+}
+
+// Advances to the next LED pattern, wrapping after the last one, and
+// resets both strips' pattern-specific state -- mirrors
+// LEDSimulator3D.html's cyclePattern()/setPattern().
+void cyclePattern()
+{
+    currentPattern = (LedPattern)((currentPattern + 1) % NUM_PATTERNS);
+    leds1.resetPattern();
+    leds2.resetPattern();
+    Serial.print(F("LED pattern: "));
+    Serial.println(patternNames[currentPattern]);
+}
 
 HeartChannel participant1(SENSOR1_SDA, SENSOR1_SCL);
 HeartChannel participant2(SENSOR2_SDA, SENSOR2_SCL);
@@ -652,10 +1480,18 @@ void setup()
     pinMode(MOTOR_PIN_D13, OUTPUT);
     analogWrite(MOTOR_PIN_D6, 0);
     analogWrite(MOTOR_PIN_D13, 0);
+    pinMode(PIN_BUTTON, INPUT_PULLUP);
 
     strip1.begin(); strip1.clear(); strip1.show();
     strip2.begin(); strip2.clear(); strip2.show();
+
+    // Per-strip identity, set before begin() so its one-time random seeding
+    // (pattern 0's hue[]) uses the right range -- see LedState::begin().
+    leds1.hueLo = SPARKLE_HUE_RANGE_1[0]; leds1.hueHi = SPARKLE_HUE_RANGE_1[1];
+    leds1.themeColor = {220, 60, 0};   // orange
     leds1.begin();
+    leds2.hueLo = SPARKLE_HUE_RANGE_2[0]; leds2.hueHi = SPARKLE_HUE_RANGE_2[1];
+    leds2.themeColor = {0, 144, 192};  // blue
     leds2.begin();
 
     Serial.println(F("The Interface - HR Visualizer"));
@@ -666,6 +1502,9 @@ void setup()
         Serial.println(F("Fix sensor wiring before using the visualizer."));
     else
         Serial.println(F("Open Serial Plotter at 115200 baud."));
+
+    Serial.print(F("LED pattern: "));
+    Serial.println(patternNames[currentPattern]);
 }
 
 void loop()
@@ -692,12 +1531,23 @@ void loop()
     analogWrite(MOTOR_PIN_D13, motor1);
     analogWrite(MOTOR_PIN_D6, motor2);
 
+    pollButton();
+
+    // Shared pattern state (Eclipse/Aurora sync shimmer) advances at most
+    // once per LED_UPDATE_MS tick -- its increment math assumes exactly
+    // that cadence, see updateSharedPatternState().
+    if (millis() - lastSharedLedUpdate >= LED_UPDATE_MS)
+    {
+        lastSharedLedUpdate = millis();
+        updateSharedPatternState(participant1.bpm, participant2.bpm);
+    }
+
     // Check for new beats and update LED strips at 50 fps.
     // Called after sensor reads so show() never interrupts a SoftWire transaction.
-    leds1.checkBeat(participant1.beatFlashUntil);
-    leds2.checkBeat(participant2.beatFlashUntil);
-    if (leds1.needsUpdate()) leds1.update(strip1);
-    if (leds2.needsUpdate()) leds2.update(strip2);
+    leds1.checkBeat(participant1.beatFlashUntil, participant1.bpm, participant2.bpm);
+    leds2.checkBeat(participant2.beatFlashUntil, participant2.bpm, participant1.bpm);
+    if (leds1.needsUpdate()) leds1.update(strip1, participant1.bpm, participant2.bpm);
+    if (leds2.needsUpdate()) leds2.update(strip2, participant2.bpm, participant1.bpm);
 
     if (millis() - lastPlotMs < 40)
         return;

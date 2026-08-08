@@ -1464,10 +1464,12 @@ unsigned long lastPlotMs = 0;
 
 // Smooths a fresh A2 reading into the shared `intensity` global -- see its
 // declaration near PIN_POT above for why this function lives down here
-// instead of next to that declaration.
+// instead of next to that declaration. Inverted (1023 - raw) so turning
+// the knob toward its wired-high end is the *low*-intensity direction --
+// physical "intense" end is the other one.
 void updateIntensity()
 {
-    float raw = analogRead(PIN_POT) / 1023.0f;
+    float raw = (1023 - analogRead(PIN_POT)) / 1023.0f;
     intensity += (raw - intensity) * POT_SMOOTHING;
 }
 
@@ -1541,8 +1543,9 @@ void setup()
 
     // Seed with a real (unsmoothed) reading so playback starts at the
     // knob's actual position instead of easing up/down from the 1.0
-    // default over the first several updateIntensity() calls.
-    intensity = analogRead(PIN_POT) / 1023.0f;
+    // default over the first several updateIntensity() calls. Inverted --
+    // see updateIntensity()'s comment.
+    intensity = (1023 - analogRead(PIN_POT)) / 1023.0f;
 
     strip1.begin(); strip1.clear(); strip1.show();
     strip2.begin(); strip2.clear(); strip2.show();

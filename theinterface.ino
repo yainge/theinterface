@@ -19,6 +19,20 @@ const uint8_t LED_COUNT = 44;
 // loop() must keep servicing sensors/motors every iteration.
 const uint8_t PIN_BUTTON = A0;
 
+// A2 potentiometer: overall "intensity" knob (see CLAUDE.md's pin table)
+// -- scales both motor peak strength (HeartChannel::motorIntensity()) and
+// LED brightness (LedState::update()) together, from fully off (0) to
+// full strength (1.0). Low-pass filtered the same way SPO2_SMOOTHING
+// smooths the SpO2 estimate, so raw ADC jitter doesn't make the motors
+// stutter or the LEDs flicker.
+const uint8_t PIN_POT = A2;
+const float POT_SMOOTHING = 0.1f;
+float intensity = 1.0f; // 0.0-1.0, updated once per loop() by updateIntensity() (defined
+                         // further down, near startSensor()/readChannel() -- kept off this
+                         // early in the file since it'd otherwise become the first free
+                         // function in the sketch, which is where Arduino's auto-generated
+                         // prototypes get inserted; too early for HeartChannel to exist yet)
+
 const uint8_t LED_AMBIENT_FLOOR = 3;   // minimum per-pixel brightness between beats
 const uint8_t LED_SPARKLE_PEAK = 60;   // peak brightness when a new sparkle fires
 const uint8_t NUM_SPARKLES = 6;        // independent twinkling points per strip
@@ -78,8 +92,9 @@ const float SPO2_RATIO_SLOPE = 25.0f;
 
 // Motor pulse envelope: two short linear ramp-up/ramp-down lobes per beat
 // ("bum-bum") rather than one single pulse, mimicking the lub-dub of a real
-// heartbeat. Peak intensity is a fixed placeholder until the potentiometer
-// is wired in to control it.
+// heartbeat. MOTOR_PEAK_INTENSITY is the envelope's ceiling at full
+// potentiometer position (1.0) -- see HeartChannel::motorIntensity() and
+// updateIntensity(), which scale it down live from the A2 pot.
 const uint16_t LOBE1_ATTACK_MS = 30;
 const uint16_t LOBE1_DECAY_MS = 90;
 const uint16_t LOBE_GAP_MS = 120;     // silence between the two lobes
@@ -346,23 +361,28 @@ struct HeartChannel
     // iteration for a smooth envelope without extra per-loop bookkeeping.
     // What sets pulseTriggerTime (raw beat detection vs. the steady BPM
     // schedule) is decided elsewhere; this only shapes each pulse.
-    byte motorIntensity() const
+    // `intensity` (0.0-1.0, from the potentiometer -- see updateIntensity())
+    // scales MOTOR_PEAK_INTENSITY down uniformly; both lobes stay
+    // proportional to each other (LOBE2_PEAK_SCALE applies on top).
+    byte motorIntensity(float intensity) const
     {
         if (pulseTriggerTime == 0)
             return 0;
+
+        byte peak = (byte)(MOTOR_PEAK_INTENSITY * intensity);
 
         unsigned long elapsed = millis() - pulseTriggerTime;
         const uint16_t lobe1Duration = LOBE1_ATTACK_MS + LOBE1_DECAY_MS;
 
         if (elapsed < lobe1Duration)
-            return lobeIntensity(elapsed, LOBE1_ATTACK_MS, LOBE1_DECAY_MS, MOTOR_PEAK_INTENSITY);
+            return lobeIntensity(elapsed, LOBE1_ATTACK_MS, LOBE1_DECAY_MS, peak);
 
         elapsed -= lobe1Duration;
         if (elapsed < LOBE_GAP_MS)
             return 0;
 
         elapsed -= LOBE_GAP_MS;
-        byte lobe2Peak = (byte)(MOTOR_PEAK_INTENSITY * LOBE2_PEAK_SCALE);
+        byte lobe2Peak = (byte)(peak * LOBE2_PEAK_SCALE);
         return lobeIntensity(elapsed, LOBE2_ATTACK_MS, LOBE2_DECAY_MS, lobe2Peak);
     }
 
@@ -801,7 +821,12 @@ struct LedState
 
     bool needsUpdate() const { return millis() - lastUpdate >= LED_UPDATE_MS; }
 
-    void update(Adafruit_NeoPixel &strip, uint16_t myBpm, uint16_t otherBpm, bool active)
+    // `intensity` (0.0-1.0, from the potentiometer -- see updateIntensity())
+    // scales every pattern's output uniformly, applied once here at the
+    // very end of the render pipeline rather than in each pattern's own
+    // color function -- so it covers ambient glow and beat flashes alike,
+    // for every pattern, with one multiply instead of touching all ten.
+    void update(Adafruit_NeoPixel &strip, uint16_t myBpm, uint16_t otherBpm, bool active, float intensity)
     {
         lastUpdate = millis();
         hasSignal = active;
@@ -816,7 +841,8 @@ struct LedState
         for (uint8_t i = 0; i < LED_COUNT; i++)
         {
             RGBf c = getPixelColor(i);
-            strip.setPixelColor(i, strip.Color(toByte(c.r), toByte(c.g), toByte(c.b)));
+            strip.setPixelColor(i, strip.Color(
+                toByte(c.r * intensity), toByte(c.g * intensity), toByte(c.b * intensity)));
         }
         strip.show();
     }
@@ -1436,6 +1462,15 @@ HeartChannel participant2(SENSOR2_SDA, SENSOR2_SCL);
 
 unsigned long lastPlotMs = 0;
 
+// Smooths a fresh A2 reading into the shared `intensity` global -- see its
+// declaration near PIN_POT above for why this function lives down here
+// instead of next to that declaration.
+void updateIntensity()
+{
+    float raw = analogRead(PIN_POT) / 1023.0f;
+    intensity += (raw - intensity) * POT_SMOOTHING;
+}
+
 bool startSensor(HeartChannel &channel, const __FlashStringHelper *name)
 {
     Serial.print(name);
@@ -1504,6 +1539,11 @@ void setup()
     analogWrite(MOTOR_PIN_D13, 0);
     pinMode(PIN_BUTTON, INPUT_PULLUP);
 
+    // Seed with a real (unsmoothed) reading so playback starts at the
+    // knob's actual position instead of easing up/down from the 1.0
+    // default over the first several updateIntensity() calls.
+    intensity = analogRead(PIN_POT) / 1023.0f;
+
     strip1.begin(); strip1.clear(); strip1.show();
     strip2.begin(); strip2.clear(); strip2.show();
 
@@ -1534,6 +1574,10 @@ void loop()
     readChannel(participant1);
     readChannel(participant2);
 
+    // Overall strength/brightness knob (A2) -- smoothed against ADC
+    // jitter, shared by the motor writes and LED render below.
+    updateIntensity();
+
     // EXPERIMENTAL: advances the steady-BPM pulse schedule once in steady
     // mode. No-op (and harmless) outside TRACKING or during the initial
     // raw-feedback phase -- see PULSE_STEADY_TRANSITION_MS.
@@ -1543,8 +1587,8 @@ void loop()
     // Sampled once per loop and reused for both the motor write and the
     // (throttled) print below, so the printed Motor value always matches
     // exactly what was written to the pin this iteration.
-    byte motor1 = participant1.motorIntensity();
-    byte motor2 = participant2.motorIntensity();
+    byte motor1 = participant1.motorIntensity(intensity);
+    byte motor2 = participant2.motorIntensity(intensity);
 
     // Updated every loop() iteration (not gated by the plot throttle below)
     // so the ramp envelope is smooth rather than stepping in 40 ms chunks.
@@ -1569,8 +1613,8 @@ void loop()
     // sensor reads so show() never interrupts a SoftWire transaction.
     leds1.checkBeat(participant1.pulseTriggerTime, participant1.bpm, participant2.bpm);
     leds2.checkBeat(participant2.pulseTriggerTime, participant2.bpm, participant1.bpm);
-    if (leds1.needsUpdate()) leds1.update(strip1, participant1.bpm, participant2.bpm, participant1.state == TRACKING);
-    if (leds2.needsUpdate()) leds2.update(strip2, participant2.bpm, participant1.bpm, participant2.state == TRACKING);
+    if (leds1.needsUpdate()) leds1.update(strip1, participant1.bpm, participant2.bpm, participant1.state == TRACKING, intensity);
+    if (leds2.needsUpdate()) leds2.update(strip2, participant2.bpm, participant1.bpm, participant2.state == TRACKING, intensity);
 
     if (millis() - lastPlotMs < 40)
         return;

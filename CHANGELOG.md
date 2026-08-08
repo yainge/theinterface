@@ -6,6 +6,7 @@ All notable changes to The Interface are documented here.
 
 ### Added
 
+- LED beat reaction now keys off the same shared `pulseTriggerTime` the motor envelope already used (renamed from `motorTriggerTime`, along with `inSteadyMotorMode()`/`updateMotorSchedule()`/`MOTOR_STEADY_TRANSITION_MS` -> `inSteadyPulseMode()`/`updatePulseSchedule()`/`PULSE_STEADY_TRANSITION_MS`), instead of the raw-only `beatFlashUntil`. This puts the motor and LEDs in lockstep, and once past the steady-mode transition, both keep pulsing on the rolling BPM average even if an individual raw beat is misread or missed -- and both fall silent together the moment a channel loses contact (`pulseTriggerTime` resets to 0 in `resetBeatState()`). `beatFlashUntil` still exists but is now diagnostic-only (drives the Serial `Beat1`/`Beat2` field).
 - 10 selectable LED patterns (Red-Blue, Chase, Rainbow Wave, Lava, Eclipse, Rings, Plant, Slow Rainbow, Sparkle, Aurora), ported from the `LEDSimulator3D.html` design tool into `theinterface.ino`, cycled live on both strips by the A0 pushbutton (non-blocking debounce) with the active pattern name printed to Serial on each press. Eclipse, Plant, and Aurora each add a cross-strip "hearts in sync" reaction (BPM delta at/under a per-pattern threshold) on top of their own per-strip animation.
 - Two-participant serial heart-rate visualizer in `theinterface.ino`.
 - Per-participant runtime states: no contact, calibration, and tracking.

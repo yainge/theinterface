@@ -88,12 +88,16 @@ const uint16_t LOBE2_DECAY_MS = 90;
 const float LOBE2_PEAK_SCALE = 0.7;   // second lobe a bit softer than the first, like a real "dub"
 const byte MOTOR_PEAK_INTENSITY = 180; // 0-255 analogWrite duty cycle
 
-// EXPERIMENTAL (this branch only): motor feedback starts by following each
-// raw detected beat, then after this long in TRACKING switches to a steady
-// pulse timed off the rolling BPM average instead of individual beat
-// jitter. BPM/HRV/SpO2 computation is unaffected either way -- this only
-// changes what schedules the motor's two-tone pulse.
-const unsigned long MOTOR_STEADY_TRANSITION_MS = 7000;
+// EXPERIMENTAL (this branch only): felt/visual feedback -- both the motor's
+// pulse and the LED beat reaction -- starts by following each raw detected
+// beat, then after this long in TRACKING switches to a steady pulse timed
+// off the rolling BPM average instead of individual beat jitter. This is
+// what keeps the motor and LEDs pulsing together, in time with each other,
+// and immune to an occasional misread/missed raw beat once locked in.
+// BPM/HRV/SpO2 computation is unaffected either way -- this only changes
+// what schedules pulseTriggerTime (see below), which both the motor's
+// two-tone envelope and the LED beat reaction key off of.
+const unsigned long PULSE_STEADY_TRANSITION_MS = 7000;
 
 enum ChannelState : byte
 {
@@ -123,7 +127,8 @@ struct HeartChannel
     unsigned long beatFlashUntil;
     unsigned long lastGainAdjust;
     unsigned long gainStableSince;
-    unsigned long motorTriggerTime;
+    unsigned long pulseTriggerTime; // shared trigger instant for both the motor's envelope and
+                                     // the LED beat reaction -- see PULSE_STEADY_TRANSITION_MS
     unsigned long trackingStartTime;
     unsigned long nextSteadyPulseTime;
 
@@ -140,7 +145,7 @@ struct HeartChannel
           irLedCurrent(INITIAL_LED_CURRENT), dcEstimate(0), wave(0), positivePeak(0),
           redLedCurrent(INITIAL_LED_CURRENT), redDcEstimate(0), redWave(0), redPositivePeak(0),
           threshold(INITIAL_THRESHOLD), sampleTime(0), lastBeatTime(0),
-          beatFlashUntil(0), lastGainAdjust(0), gainStableSince(0), motorTriggerTime(0),
+          beatFlashUntil(0), lastGainAdjust(0), gainStableSince(0), pulseTriggerTime(0),
           trackingStartTime(0), nextSteadyPulseTime(0),
           bpm(0), hrv(0), spo2(0),
           intervalCount(0), intervalIndex(0)
@@ -158,7 +163,7 @@ struct HeartChannel
         redPositivePeak = 0;
         threshold = INITIAL_THRESHOLD;
         lastBeatTime = 0;
-        motorTriggerTime = 0;
+        pulseTriggerTime = 0;
         bpm = 0;
         hrv = 0;
         spo2 = 0;
@@ -193,29 +198,33 @@ struct HeartChannel
         state = TRACKING;
         resetBeatState();
         // Starts the raw-feedback phase timer fresh every time tracking
-        // (re)starts, e.g. after a contact loss -- see MOTOR_STEADY_TRANSITION_MS.
+        // (re)starts, e.g. after a contact loss -- see PULSE_STEADY_TRANSITION_MS.
         trackingStartTime = millis();
         nextSteadyPulseTime = 0;
     }
 
-    // True once MOTOR_STEADY_TRANSITION_MS has elapsed in TRACKING and a
+    // True once PULSE_STEADY_TRANSITION_MS has elapsed in TRACKING and a
     // BPM estimate exists to time a steady pulse off of.
-    bool inSteadyMotorMode() const
+    bool inSteadyPulseMode() const
     {
         return state == TRACKING && bpm > 0 &&
-               (millis() - trackingStartTime) >= MOTOR_STEADY_TRANSITION_MS;
+               (millis() - trackingStartTime) >= PULSE_STEADY_TRANSITION_MS;
     }
 
-    // EXPERIMENTAL: once in steady mode, fires a motor pulse on a fixed
-    // schedule derived from the rolling BPM average instead of individual
-    // raw beat detections. Call once per loop() iteration (time-based, not
-    // tied to FIFO sample processing).
-    void updateMotorSchedule()
+    // EXPERIMENTAL: once in steady mode, fires the shared motor+LED pulse
+    // on a fixed schedule derived from the rolling BPM average instead of
+    // individual raw beat detections. Call once per loop() iteration
+    // (time-based, not tied to FIFO sample processing). Naturally pauses
+    // (does nothing, sets no new pulseTriggerTime) whenever this channel
+    // isn't TRACKING -- e.g. no finger on the sensor -- so losing contact
+    // silences both the motor and the LED beat reaction rather than
+    // leaving them pulsing on a stale schedule.
+    void updatePulseSchedule()
     {
         if (state != TRACKING)
             return;
 
-        if (!inSteadyMotorMode())
+        if (!inSteadyPulseMode())
         {
             nextSteadyPulseTime = 0; // re-arm so the first steady pulse fires promptly on transition
             return;
@@ -224,7 +233,7 @@ struct HeartChannel
         unsigned long now = millis();
         if (nextSteadyPulseTime == 0 || now >= nextSteadyPulseTime)
         {
-            motorTriggerTime = now;
+            pulseTriggerTime = now;
             nextSteadyPulseTime = now + 60000UL / bpm;
         }
     }
@@ -333,16 +342,16 @@ struct HeartChannel
 
     // Two-tone "bum-bum" heartbeat feel: a full-intensity lobe, a short
     // silence, then a softer second lobe -- purely a function of elapsed
-    // time since motorTriggerTime, so it can be sampled every loop()
+    // time since pulseTriggerTime, so it can be sampled every loop()
     // iteration for a smooth envelope without extra per-loop bookkeeping.
-    // What sets motorTriggerTime (raw beat detection vs. the steady BPM
+    // What sets pulseTriggerTime (raw beat detection vs. the steady BPM
     // schedule) is decided elsewhere; this only shapes each pulse.
     byte motorIntensity() const
     {
-        if (motorTriggerTime == 0)
+        if (pulseTriggerTime == 0)
             return 0;
 
-        unsigned long elapsed = millis() - motorTriggerTime;
+        unsigned long elapsed = millis() - pulseTriggerTime;
         const uint16_t lobe1Duration = LOBE1_ATTACK_MS + LOBE1_DECAY_MS;
 
         if (elapsed < lobe1Duration)
@@ -436,17 +445,19 @@ struct HeartChannel
                 }
                 lastBeatTime = sampleTime;
 
-                // Felt/visual feedback on every real detected peak, even if
-                // its interval got rejected above for BPM/HRV purposes --
-                // an implausible interval doesn't mean the peak was fake,
-                // and a suppressed motor pulse reads as "sometimes nothing
-                // happens" even though the sensor saw a real beat.
+                // Diagnostic-only marker for the Serial "Beat" field
+                // (printChannel()) -- fires on every real detected peak,
+                // even one whose interval got rejected above for BPM/HRV
+                // purposes, so it reflects raw sensor detection regardless
+                // of what's currently driving the felt/visual pulse below.
                 beatFlashUntil = millis() + 120;
 
-                // EXPERIMENTAL: once in steady mode, updateMotorSchedule()
-                // owns motorTriggerTime instead of raw beat detection.
-                if (!inSteadyMotorMode())
-                    motorTriggerTime = millis();
+                // EXPERIMENTAL: once in steady mode, updatePulseSchedule()
+                // owns pulseTriggerTime instead of raw beat detection --
+                // this is what the motor's envelope and the LED beat
+                // reaction actually key off of (see checkBeat()).
+                if (!inSteadyPulseMode())
+                    pulseTriggerTime = millis();
             }
 
             updateSpO2();
@@ -492,7 +503,7 @@ struct HeartChannel
 // unsigned long millis(), never float: a float's 24-bit mantissa silently
 // loses millisecond precision past ~4.66 hours, which would corrupt every
 // elapsed-time calculation on a long-running installation. 0 means
-// "inactive", matching this file's existing motorTriggerTime==0 idiom.
+// "inactive", matching this file's existing pulseTriggerTime==0 idiom.
 // Purely-cosmetic continuous-phase math (hue drift, breathing brightness)
 // instead wraps "now" via PHASE_WRAP_MS to stay float-precision-safe
 // forever without needing a timestamp at all.
@@ -624,11 +635,9 @@ const uint8_t SLOW_RAINBOW_MAX_BRIGHTNESS = 180;
 const float SLOW_RAINBOW_BEAT_KICK = 150.0f;
 
 // Pattern 8 (Sparkle/Twinkle) -- separate from pattern 0's sparkle state.
+// Purely beat-reactive now (see updateTwinkle()) -- no ambient-rate
+// constants needed, just the beat-triggered burst's size/color/brightness.
 const float TWINKLE_HUE_MIN = 42.0f, TWINKLE_HUE_MAX = 58.0f;
-const uint8_t TWINKLE_PEAK = 80;
-const uint16_t TWINKLE_REFERENCE_BPM = 70;
-const float TWINKLE_MIN_INTERVAL = 15.0f;
-const float TWINKLE_MAX_INTERVAL = 50.0f;
 const uint8_t TWINKLE_BEAT_COUNT = 3;
 const uint8_t TWINKLE_BEAT_BRIGHTNESS = 255;
 
@@ -644,10 +653,26 @@ struct LedState
 {
     uint8_t pxBright[LED_COUNT];
     uint8_t beatPulse;
-    unsigned long lastBeatFlash;   // last beatFlashUntil value we've seen; used
-                                   // to detect a new beat without re-triggering
-                                   // on every loop iteration during the flash window
+    unsigned long lastPulseTrigger; // last HeartChannel::pulseTriggerTime seen; used
+                                     // to detect a new pulse without re-triggering on
+                                     // every loop() iteration. This is the SAME shared
+                                     // trigger the motor's envelope keys off of (see
+                                     // PULSE_STEADY_TRANSITION_MS), not the raw-only
+                                     // beatFlashUntil -- so the LED beat reaction stays
+                                     // in lockstep with the motor and, once in steady
+                                     // mode, survives an occasional misread/missed raw
+                                     // beat instead of silently skipping a pulse.
     unsigned long lastUpdate;
+
+    // True when this participant's channel is actively TRACKING a
+    // heartbeat (see loop()'s update() call sites). Gates the
+    // beat-reactive patterns (everything except Slow Rainbow/Sparkle/
+    // Aurora) fully dark in getPixelColor() when there's no signal --
+    // those three are ambient/idle by design (see DESIGN.md) and ignore
+    // this. Per-pattern update() math still runs either way (cheap, and
+    // it's what naturally settles Chase/Lava/etc. back to their own idle
+    // state once a signal returns) -- only the rendered color is gated.
+    bool hasSignal;
 
     uint8_t sparklePos[NUM_SPARKLES];
     uint8_t sparkleTimer[NUM_SPARKLES]; // counts down; when 0, pick a new position
@@ -690,11 +715,8 @@ struct LedState
     float slowRainbowHue;
 
     // Pattern 8 (Sparkle/Twinkle) -- own state, independent of pattern 0's
-    // sparklePos/sparkleTimer/hue above so the two tune separately.
-    uint8_t twinklePos[NUM_SPARKLES];
-    float twinkleTimer[NUM_SPARKLES]; // float, not uint8_t -- BPM-scaled fractional
-                                       // intervals can step straight over an integer 0
-                                       // and freeze that slot forever; see updateTwinkle().
+    // sparklePos/sparkleTimer/hue above so the two tune separately. Purely
+    // beat-reactive (see updateTwinkle()) -- no ambient-timer state needed.
     float twinkleBright[LED_COUNT];
     float twinkleHue[LED_COUNT];
 
@@ -707,8 +729,9 @@ struct LedState
         for (uint8_t i = 0; i < LED_COUNT; i++)
             pxBright[i] = LED_AMBIENT_FLOOR;
         beatPulse = 0;
-        lastBeatFlash = 0;
+        lastPulseTrigger = 0;
         lastUpdate = 0;
+        hasSignal = false;
         for (uint8_t i = 0; i < NUM_SPARKLES; i++)
         {
             sparklePos[i] = random(LED_COUNT);
@@ -720,11 +743,6 @@ struct LedState
         // switch away and back doesn't reset them.
         for (uint8_t i = 0; i < LED_COUNT; i++)
             hue[i] = randomHueInRange(hueLo, hueHi);
-        for (uint8_t i = 0; i < NUM_SPARKLES; i++)
-        {
-            twinklePos[i] = random(LED_COUNT);
-            twinkleTimer[i] = random(10, 30);
-        }
         for (uint8_t i = 0; i < LED_COUNT; i++)
         {
             twinkleHue[i] = randomHueInRange(TWINKLE_HUE_MIN, TWINKLE_HUE_MAX);
@@ -739,10 +757,10 @@ struct LedState
 
     // Mirrors LEDSimulator3D.html's setPattern() reset block exactly --
     // called from begin() and on every button-triggered pattern change.
-    // Deliberately does NOT reset hue[]/sparklePos/sparkleTimer/twinklePos/
-    // twinkleTimer/twinkleHue/plantHue/slowRainbowHue/auroraPhase/
-    // auroraIntensity -- e.g. Aurora's per-strip phase offset must survive
-    // switching away and back.
+    // Deliberately does NOT reset hue[]/sparklePos/sparkleTimer/
+    // twinkleHue/plantHue/slowRainbowHue/auroraPhase/auroraIntensity --
+    // e.g. Aurora's per-strip phase offset must survive switching away
+    // and back.
     void resetPattern()
     {
         for (uint8_t i = 0; i < LED_COUNT; i++)
@@ -762,27 +780,31 @@ struct LedState
             flowerStart[i] = 0;
         plantFadeOutStart = 0;
         for (uint8_t i = 0; i < LED_COUNT; i++)
-            twinkleBright[i] = LED_AMBIENT_FLOOR;
+            twinkleBright[i] = 0;
     }
 
-    // Call once per loop() — detects a newly set beatFlashUntil and
-    // dispatches this pattern's own beat reaction (reactToBeat(), defined
-    // below once the per-pattern functions it calls are all in scope).
-    void checkBeat(unsigned long beatFlashUntil, uint16_t myBpm, uint16_t otherBpm)
+    // Call once per loop() — detects a newly set HeartChannel::pulseTriggerTime
+    // and dispatches this pattern's own beat reaction (reactToBeat(),
+    // defined below once the per-pattern functions it calls are all in
+    // scope). pulseTriggerTime == 0 means "no pulse" (no contact, or
+    // contact just lost -- see HeartChannel::resetBeatState()), so this
+    // naturally stays silent whenever the sensor isn't reading a signal.
+    void checkBeat(unsigned long pulseTriggerTime, uint16_t myBpm, uint16_t otherBpm)
     {
-        if (beatFlashUntil != lastBeatFlash && beatFlashUntil > millis())
+        if (pulseTriggerTime != 0 && pulseTriggerTime != lastPulseTrigger)
         {
             beatPulse = 255;
             reactToBeat(myBpm, otherBpm);
-            lastBeatFlash = beatFlashUntil;
+            lastPulseTrigger = pulseTriggerTime;
         }
     }
 
     bool needsUpdate() const { return millis() - lastUpdate >= LED_UPDATE_MS; }
 
-    void update(Adafruit_NeoPixel &strip, uint16_t myBpm, uint16_t otherBpm)
+    void update(Adafruit_NeoPixel &strip, uint16_t myBpm, uint16_t otherBpm, bool active)
     {
         lastUpdate = millis();
+        hasSignal = active;
 
         if (beatPulse > LED_BEAT_DECAY)
             beatPulse -= LED_BEAT_DECAY;
@@ -863,9 +885,13 @@ void updateChase(LedState &state)
 
 RGBf chasePixelColor(const LedState &state, uint8_t i)
 {
+    // No ambient floor -- purely reactive, per the refined "off except
+    // for heart pulses" spec. Once chaseHead has swept past a pixel's
+    // falloff radius (glow reaches 0), that pixel is fully black rather
+    // than resting at LED_AMBIENT_FLOOR.
     float dist = fabsf((float)i - state.chaseHead);
     float glow = max(0.0f, CHASE_GLOW_PEAK - dist * CHASE_GLOW_FALLOFF);
-    float b = min(255.0f, glow + LED_AMBIENT_FLOOR);
+    float b = min(255.0f, glow);
     return { CHASE_COLOR.r * b / 255.0f, CHASE_COLOR.g * b / 255.0f, CHASE_COLOR.b * b / 255.0f };
 }
 
@@ -888,9 +914,10 @@ void updateRainbowWave(LedState &state)
 
 RGBf rainbowPixelColor(const LedState &state, uint8_t i)
 {
-    float r = state.themeColor.r * LED_AMBIENT_FLOOR / 255.0f;
-    float g = state.themeColor.g * LED_AMBIENT_FLOOR / 255.0f;
-    float b = state.themeColor.b * LED_AMBIENT_FLOOR / 255.0f;
+    // No ambient floor tint -- purely reactive, per the refined "off
+    // except for heart pulses" spec. Pixels outside every active wave's
+    // tail stay fully black rather than resting at a dim themeColor tint.
+    float r = 0, g = 0, b = 0;
 
     float nowPhase = (float)(state.lastUpdate % PHASE_WRAP_MS);
     float hueShift = fmodf(nowPhase * 0.05f, 360.0f);
@@ -947,11 +974,10 @@ void updateLava(LedState &state)
 
 RGBf lavaPixelColor(const LedState &state, uint8_t i)
 {
-    float floorR = state.themeColor.r * LED_AMBIENT_FLOOR / 255.0f;
-    float floorG = state.themeColor.g * LED_AMBIENT_FLOOR / 255.0f;
-    float floorB = state.themeColor.b * LED_AMBIENT_FLOOR / 255.0f;
-    RGBf c = lavaColor(state.heat[i]);
-    return { max(floorR, c.r), max(floorG, c.g), max(floorB, c.b) };
+    // No ambient floor tint -- purely reactive, per the refined "off
+    // except for heart pulses" spec. Heat that's fully cooled (0) renders
+    // as true black instead of a dim themeColor tint.
+    return lavaColor(state.heat[i]);
 }
 
 // Pattern 4: Eclipse. Idles at full brightness (a hazy sun); each beat
@@ -1012,9 +1038,10 @@ void updateRings(LedState &state)
 
 RGBf ringsPixelColor(const LedState &state, uint8_t i)
 {
-    float r = RING_COLOR.r * LED_AMBIENT_FLOOR / 255.0f;
-    float g = RING_COLOR.g * LED_AMBIENT_FLOOR / 255.0f;
-    float b = RING_COLOR.b * LED_AMBIENT_FLOOR / 255.0f;
+    // No ambient floor tint -- purely reactive, per the refined "off
+    // except for heart pulses" spec. Outside any active ring's band,
+    // pixels stay fully black instead of resting at a dim RING_COLOR tint.
+    float r = 0, g = 0, b = 0;
 
     if (state.ringStart != 0)
     {
@@ -1140,37 +1167,20 @@ RGBf slowRainbowPixelColor(const LedState &state, uint8_t i)
     return hsvToRgb(hue, 1.0f, brightness / 255.0f);
 }
 
-// Pattern 8: Sparkle/Twinkle. Warm gold ambient twinkle whose ambient pop
-// *rate* (not a beat-triggered burst) responds to this strip's own BPM --
-// see reactToBeat() for the extra beat-triggered sparkles on top.
-void updateTwinkle(LedState &state, uint16_t myBpm)
+// Pattern 8: Sparkle/Twinkle. Purely reactive, per the refined "off except
+// for heart pulses" spec -- no ambient auto-pop timer anymore (that used
+// to pop sparkles on a BPM-scaled timer independent of real detected
+// beats). Every sparkle now comes from reactToBeat()'s
+// TWINKLE_BEAT_COUNT burst on an actual beat; this just decays those
+// pixels back to true black (not LED_AMBIENT_FLOOR) between beats.
+void updateTwinkle(LedState &state)
 {
     for (uint8_t i = 0; i < LED_COUNT; i++)
     {
-        if (state.twinkleBright[i] > LED_AMBIENT_FLOOR + LED_PIXEL_DECAY)
+        if (state.twinkleBright[i] > LED_PIXEL_DECAY)
             state.twinkleBright[i] -= LED_PIXEL_DECAY;
         else
-            state.twinkleBright[i] = LED_AMBIENT_FLOOR;
-    }
-
-    float rateScale = (float)TWINKLE_REFERENCE_BPM / max((uint16_t)1, myBpm); // guards divide-by-zero pre-tracking
-    float minInterval = max(2.0f, TWINKLE_MIN_INTERVAL * rateScale);
-    float maxInterval = max(minInterval + 1.0f, TWINKLE_MAX_INTERVAL * rateScale);
-
-    for (uint8_t i = 0; i < NUM_SPARKLES; i++)
-    {
-        if (state.twinkleTimer[i] <= 0.0f)
-        {
-            uint8_t idx = random(LED_COUNT);
-            state.twinklePos[i] = idx;
-            state.twinkleBright[idx] = random(TWINKLE_PEAK / 2, TWINKLE_PEAK);
-            state.twinkleHue[idx] = randomHueInRange(TWINKLE_HUE_MIN, TWINKLE_HUE_MAX);
-            state.twinkleTimer[i] = minInterval + randomFloat01() * (maxInterval - minInterval);
-        }
-        else
-        {
-            state.twinkleTimer[i] -= 1.0f;
-        }
+            state.twinkleBright[i] = 0;
     }
 }
 
@@ -1266,7 +1276,7 @@ void LedState::updatePattern(uint16_t myBpm, uint16_t otherBpm)
     case PATTERN_RINGS:        updateRings(*this); break;
     case PATTERN_PLANT:        updatePlant(*this); break;
     case PATTERN_SLOW_RAINBOW: updateSlowRainbow(*this, (uint16_t)(((uint32_t)myBpm + otherBpm) / 2)); break;
-    case PATTERN_SPARKLE:      updateTwinkle(*this, myBpm); break;
+    case PATTERN_SPARKLE:      updateTwinkle(*this); break;
     case PATTERN_AURORA:       updateAurora(*this, myBpm); break;
     default: break;
     }
@@ -1274,6 +1284,21 @@ void LedState::updatePattern(uint16_t myBpm, uint16_t otherBpm)
 
 RGBf LedState::getPixelColor(uint8_t i) const
 {
+    // Slow Rainbow/Sparkle/Aurora are ambient/idle by design (DESIGN.md's
+    // "Idle / no reading -> slow twinkling ambient light") and always
+    // render, signal or not. Every other pattern is beat-reactive and
+    // stays fully dark without a live heartbeat, per the refined spec --
+    // rather than showing their own idle drift/decay.
+    switch (currentPattern)
+    {
+    case PATTERN_SLOW_RAINBOW: return slowRainbowPixelColor(*this, i);
+    case PATTERN_SPARKLE:      return twinklePixelColor(*this, i);
+    case PATTERN_AURORA:       return auroraPixelColor(*this, i);
+    default: break;
+    }
+    if (!hasSignal)
+        return {0, 0, 0};
+
     switch (currentPattern)
     {
     case PATTERN_CHASE:        return chasePixelColor(*this, i);
@@ -1282,9 +1307,6 @@ RGBf LedState::getPixelColor(uint8_t i) const
     case PATTERN_ECLIPSE:      return eclipsePixelColor(*this, i);
     case PATTERN_RINGS:        return ringsPixelColor(*this, i);
     case PATTERN_PLANT:        return plantPixelColor(*this, i);
-    case PATTERN_SLOW_RAINBOW: return slowRainbowPixelColor(*this, i);
-    case PATTERN_SPARKLE:      return twinklePixelColor(*this, i);
-    case PATTERN_AURORA:       return auroraPixelColor(*this, i);
     default:                   return sparklePixelColor(*this, i); // PATTERN_RED_BLUE
     }
 }
@@ -1380,7 +1402,7 @@ void cyclePattern();
 // stable state only after it's held for BUTTON_DEBOUNCE_MS. Unlike
 // HardwareTest.ino's testButton() (blocking, while(digitalRead())), loop()
 // here must keep servicing sensors/motors every iteration -- same
-// millis()-driven idiom as HeartChannel::updateMotorSchedule().
+// millis()-driven idiom as HeartChannel::updatePulseSchedule().
 void pollButton()
 {
     bool raw = digitalRead(PIN_BUTTON);
@@ -1468,7 +1490,7 @@ void printChannel(const HeartChannel &channel, char suffix, byte motor)
     Serial.print(F(" Motor")); Serial.print(suffix); Serial.print(':'); Serial.print(motor);
     Serial.print(F(" State")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.plotState());
     // EXPERIMENTAL: 0 = following raw beat detection, 1 = steady BPM pulse.
-    Serial.print(F(" Mode")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.inSteadyMotorMode() ? 1 : 0);
+    Serial.print(F(" Mode")); Serial.print(suffix); Serial.print(':'); Serial.print(channel.inSteadyPulseMode() ? 1 : 0);
 }
 
 void setup()
@@ -1514,9 +1536,9 @@ void loop()
 
     // EXPERIMENTAL: advances the steady-BPM pulse schedule once in steady
     // mode. No-op (and harmless) outside TRACKING or during the initial
-    // raw-feedback phase -- see MOTOR_STEADY_TRANSITION_MS.
-    participant1.updateMotorSchedule();
-    participant2.updateMotorSchedule();
+    // raw-feedback phase -- see PULSE_STEADY_TRANSITION_MS.
+    participant1.updatePulseSchedule();
+    participant2.updatePulseSchedule();
 
     // Sampled once per loop and reused for both the motor write and the
     // (throttled) print below, so the printed Motor value always matches
@@ -1542,12 +1564,13 @@ void loop()
         updateSharedPatternState(participant1.bpm, participant2.bpm);
     }
 
-    // Check for new beats and update LED strips at 50 fps.
-    // Called after sensor reads so show() never interrupts a SoftWire transaction.
-    leds1.checkBeat(participant1.beatFlashUntil, participant1.bpm, participant2.bpm);
-    leds2.checkBeat(participant2.beatFlashUntil, participant2.bpm, participant1.bpm);
-    if (leds1.needsUpdate()) leds1.update(strip1, participant1.bpm, participant2.bpm);
-    if (leds2.needsUpdate()) leds2.update(strip2, participant2.bpm, participant1.bpm);
+    // Check for new pulses (the same shared trigger the motor envelope
+    // above just used) and update LED strips at 50 fps. Called after
+    // sensor reads so show() never interrupts a SoftWire transaction.
+    leds1.checkBeat(participant1.pulseTriggerTime, participant1.bpm, participant2.bpm);
+    leds2.checkBeat(participant2.pulseTriggerTime, participant2.bpm, participant1.bpm);
+    if (leds1.needsUpdate()) leds1.update(strip1, participant1.bpm, participant2.bpm, participant1.state == TRACKING);
+    if (leds2.needsUpdate()) leds2.update(strip2, participant2.bpm, participant1.bpm, participant2.state == TRACKING);
 
     if (millis() - lastPlotMs < 40)
         return;

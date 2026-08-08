@@ -592,6 +592,35 @@ const char *const patternNames[NUM_PATTERNS] = {
 };
 LedPattern currentPattern = PATTERN_RED_BLUE; // shared by both strips -- the button cycles this
 
+// ── Modes ────────────────────────────────────────────────────────────────
+// A separate, higher-level layer from the 10 LED patterns above: each mode
+// changes *what drives* the felt/visual pulse (sensor-driven vs. a fixed
+// synthetic clock, currently), while the button's single-press pattern
+// cycling keeps working underneath it. LED index 0 on both strips is
+// reserved to show which mode is active (see LedState::update()) --
+// intentionally NOT scaled by `intensity`, so it stays legible even with
+// the brightness knob turned low. Triple-pressing the A0 button within
+// MODE_TRIPLE_CLICK_WINDOW_MS cycles modes (see pollButton()/cycleMode());
+// a single press still cycles the LED pattern immediately either way, so a
+// fast triple-click also flips through 3 patterns as a side effect of
+// getting to the 3rd press.
+//
+// MODE_YELLOW is a placeholder -- not designed yet, so it currently just
+// behaves like MODE_NORMAL (real sensor-driven, all 10 patterns) with a
+// yellow LED 0 instead of off.
+enum Mode : uint8_t { MODE_NORMAL = 0, MODE_AUTO_ENTRAIN, MODE_YELLOW, NUM_MODES };
+const char *const modeNames[NUM_MODES] = { "Normal", "Auto Entrain", "Yellow" };
+const RGBf MODE_INDICATOR_COLOR[NUM_MODES] = { {0, 0, 0}, {0, 0, 255}, {255, 255, 0} };
+Mode currentMode = MODE_NORMAL; // shared by both strips
+
+// Auto Entrain: an artificial, sensor-independent heartbeat shared by both
+// participants at a fixed slow rate, meant to gently pull both people
+// toward it rather than reflect either of their real heartrates -- see
+// updateAutoEntrainClock() and loop()'s MODE_AUTO_ENTRAIN branch, which
+// skips real sensor reads entirely while this mode is active.
+const uint16_t AUTO_ENTRAIN_BPM = 6;
+const unsigned long AUTO_ENTRAIN_INTERVAL_MS = 60000UL / AUTO_ENTRAIN_BPM;
+
 // Pattern 0 (Red-Blue): per-pixel hue within each strip's own theme range.
 const uint8_t SPARKLE_BEAT_COUNT = 14;
 const float SPARKLE_HUE_RANGE_1[2] = {0.0f, 35.0f};    // red -> orange (strip 1)
@@ -844,6 +873,14 @@ struct LedState
             strip.setPixelColor(i, strip.Color(
                 toByte(c.r * intensity), toByte(c.g * intensity), toByte(c.b * intensity)));
         }
+
+        // LED 0 is reserved as the mode indicator -- overwritten after the
+        // normal per-pixel loop above so every pattern can keep computing
+        // index 0 like any other pixel without needing to special-case it.
+        // Not scaled by `intensity` -- see the "Modes" comment block above.
+        RGBf modeColor = MODE_INDICATOR_COLOR[currentMode];
+        strip.setPixelColor(0, strip.Color(toByte(modeColor.r), toByte(modeColor.g), toByte(modeColor.b)));
+
         strip.show();
     }
 
@@ -1416,13 +1453,21 @@ void LedState::reactToBeat(uint16_t myBpm, uint16_t otherBpm)
     }
 }
 
-// ── A0 button: cycles the LED pattern ───────────────────────────────────────
+// ── A0 button: cycles the LED pattern, triple-click cycles the mode ────────
 const uint16_t BUTTON_DEBOUNCE_MS = 30;
 bool buttonLastRaw = HIGH;       // HIGH = released (INPUT_PULLUP, active-LOW)
 bool buttonStableState = HIGH;
 unsigned long buttonLastChangeMs = 0;
 
+// Triple-click-within-2s mode gesture, layered on top of (not instead of)
+// the single-press pattern cycle below -- see the "Modes" comment block
+// above LedPattern's currentPattern for why.
+const uint16_t MODE_TRIPLE_CLICK_WINDOW_MS = 2000;
+uint8_t clickCount = 0;
+unsigned long clickWindowStart = 0; // 0 = no click window currently open
+
 void cyclePattern();
+void cycleMode();
 
 // Non-blocking debounce: track the last raw level change, commit a new
 // stable state only after it's held for BUTTON_DEBOUNCE_MS. Unlike
@@ -1441,7 +1486,30 @@ void pollButton()
     {
         buttonStableState = raw;
         if (buttonStableState == LOW) // falling edge = press
+        {
             cyclePattern();
+
+            // Every press counts toward the click window regardless of
+            // the pattern cycle above -- if the 1st and 3rd press both
+            // land inside MODE_TRIPLE_CLICK_WINDOW_MS, that's a triple-click.
+            unsigned long now = millis();
+            if (clickWindowStart == 0 || now - clickWindowStart > MODE_TRIPLE_CLICK_WINDOW_MS)
+            {
+                clickWindowStart = now;
+                clickCount = 1;
+            }
+            else
+            {
+                clickCount++;
+            }
+
+            if (clickCount >= 3)
+            {
+                cycleMode();
+                clickCount = 0;
+                clickWindowStart = 0; // re-arm: next press opens a fresh window
+            }
+        }
     }
 }
 
@@ -1461,6 +1529,45 @@ HeartChannel participant1(SENSOR1_SDA, SENSOR1_SCL);
 HeartChannel participant2(SENSOR2_SDA, SENSOR2_SCL);
 
 unsigned long lastPlotMs = 0;
+
+unsigned long autoEntrainNextBeat = 0; // 0 = not yet armed; see updateAutoEntrainClock()
+
+// Advances to the next mode, wrapping after the last one. Resets the Auto
+// Entrain clock and clears any pulseTriggerTime left over from it, so
+// leaving/entering that mode never leaves a stale pulse behind for the
+// motor/LED code to react to on the next iteration. Lives here (not next
+// to pollButton()/cyclePattern()) since it needs participant1/participant2,
+// declared just above.
+void cycleMode()
+{
+    currentMode = (Mode)((currentMode + 1) % NUM_MODES);
+    autoEntrainNextBeat = 0;
+    participant1.pulseTriggerTime = 0;
+    participant2.pulseTriggerTime = 0;
+    Serial.print(F("Mode: "));
+    Serial.println(modeNames[currentMode]);
+}
+
+// Auto Entrain mode: a synthetic, sensor-independent heartbeat shared by
+// both participants at a fixed AUTO_ENTRAIN_BPM, driving the exact same
+// pulseTriggerTime-based motor envelope and LED beat reaction real beats
+// use (HeartChannel::motorIntensity()/LedState::checkBeat()) -- so the
+// felt/visual pulse looks and feels identical either way, just decoupled
+// from any real physiological signal. Both channels fire in perfect
+// unison (same `now` written to both). Call once per loop() iteration
+// while in MODE_AUTO_ENTRAIN; loop() skips real sensor reads entirely
+// while this mode is active, so this is the only thing setting
+// pulseTriggerTime during that time.
+void updateAutoEntrainClock()
+{
+    unsigned long now = millis();
+    if (autoEntrainNextBeat == 0 || now >= autoEntrainNextBeat)
+    {
+        participant1.pulseTriggerTime = now;
+        participant2.pulseTriggerTime = now;
+        autoEntrainNextBeat = now + AUTO_ENTRAIN_INTERVAL_MS;
+    }
+}
 
 // Smooths a fresh A2 reading into the shared `intensity` global -- see its
 // declaration near PIN_POT above for why this function lives down here
@@ -1570,22 +1677,36 @@ void setup()
 
     Serial.print(F("LED pattern: "));
     Serial.println(patternNames[currentPattern]);
+    Serial.print(F("Mode: "));
+    Serial.println(modeNames[currentMode]);
 }
 
 void loop()
 {
-    readChannel(participant1);
-    readChannel(participant2);
+    bool autoEntrain = (currentMode == MODE_AUTO_ENTRAIN);
+
+    if (autoEntrain)
+    {
+        // Auto Entrain: no real sensor I/O at all, per spec -- a synthetic
+        // clock drives both channels' shared pulseTriggerTime instead.
+        updateAutoEntrainClock();
+    }
+    else
+    {
+        readChannel(participant1);
+        readChannel(participant2);
+
+        // EXPERIMENTAL: advances the steady-BPM pulse schedule once in steady
+        // mode. No-op (and harmless) outside TRACKING or during the initial
+        // raw-feedback phase -- see PULSE_STEADY_TRANSITION_MS.
+        participant1.updatePulseSchedule();
+        participant2.updatePulseSchedule();
+    }
 
     // Overall strength/brightness knob (A2) -- smoothed against ADC
-    // jitter, shared by the motor writes and LED render below.
+    // jitter, shared by the motor writes and LED render below. Still
+    // live in every mode.
     updateIntensity();
-
-    // EXPERIMENTAL: advances the steady-BPM pulse schedule once in steady
-    // mode. No-op (and harmless) outside TRACKING or during the initial
-    // raw-feedback phase -- see PULSE_STEADY_TRANSITION_MS.
-    participant1.updatePulseSchedule();
-    participant2.updatePulseSchedule();
 
     // Sampled once per loop and reused for both the motor write and the
     // (throttled) print below, so the printed Motor value always matches
@@ -1602,22 +1723,32 @@ void loop()
 
     pollButton();
 
+    // In Auto Entrain, participant.bpm/.state are frozen (process() isn't
+    // running) -- feed the LED/pattern code the synthetic rate and force
+    // "has signal" on instead, so beat-reactive patterns render normally
+    // off the artificial pulse rather than reading a stale real value.
+    uint16_t bpm1 = autoEntrain ? AUTO_ENTRAIN_BPM : participant1.bpm;
+    uint16_t bpm2 = autoEntrain ? AUTO_ENTRAIN_BPM : participant2.bpm;
+    bool active1 = autoEntrain ? true : (participant1.state == TRACKING);
+    bool active2 = autoEntrain ? true : (participant2.state == TRACKING);
+
     // Shared pattern state (Eclipse/Aurora sync shimmer) advances at most
     // once per LED_UPDATE_MS tick -- its increment math assumes exactly
-    // that cadence, see updateSharedPatternState().
+    // that cadence, see updateSharedPatternState(). In Auto Entrain,
+    // bpm1==bpm2 always, so both strips' sync shimmer stays fully engaged.
     if (millis() - lastSharedLedUpdate >= LED_UPDATE_MS)
     {
         lastSharedLedUpdate = millis();
-        updateSharedPatternState(participant1.bpm, participant2.bpm);
+        updateSharedPatternState(bpm1, bpm2);
     }
 
     // Check for new pulses (the same shared trigger the motor envelope
     // above just used) and update LED strips at 50 fps. Called after
     // sensor reads so show() never interrupts a SoftWire transaction.
-    leds1.checkBeat(participant1.pulseTriggerTime, participant1.bpm, participant2.bpm);
-    leds2.checkBeat(participant2.pulseTriggerTime, participant2.bpm, participant1.bpm);
-    if (leds1.needsUpdate()) leds1.update(strip1, participant1.bpm, participant2.bpm, participant1.state == TRACKING, intensity);
-    if (leds2.needsUpdate()) leds2.update(strip2, participant2.bpm, participant1.bpm, participant2.state == TRACKING, intensity);
+    leds1.checkBeat(participant1.pulseTriggerTime, bpm1, bpm2);
+    leds2.checkBeat(participant2.pulseTriggerTime, bpm2, bpm1);
+    if (leds1.needsUpdate()) leds1.update(strip1, bpm1, bpm2, active1, intensity);
+    if (leds2.needsUpdate()) leds2.update(strip2, bpm2, bpm1, active2, intensity);
 
     if (millis() - lastPlotMs < 40)
         return;

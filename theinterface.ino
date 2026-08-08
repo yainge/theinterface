@@ -606,10 +606,11 @@ LedPattern currentPattern = PATTERN_RED_BLUE; // shared by both strips -- the bu
 // Only MODE_REGULAR uses the real sensors -- the other three are all
 // synthetic-clock modes (see SYNTHETIC_BPM / currentSyntheticBpm() /
 // updateSyntheticClock()), differing only in what rate they run at:
-//   Default             -- starts at 6 BPM for DEFAULT_HOLD_MS, then
-//                          softly eases toward 60 BPM (see
-//                          updateDefaultBpmTarget()) -- a gentle
-//                          slow-down-then-settle arc, not a fixed rate.
+//   Default             -- starts at 6 BPM for DEFAULT_HOLD_MS, then each
+//                          participant's own bpm nudges 1-2 BPM closer to
+//                          60 on every one of their own beats (see
+//                          updateDefaultParticipant()) -- independently
+//                          per participant, not a shared/fixed rate.
 //   Breath Entrainment  -- fixed 6 BPM, meant to draw breathing/heart
 //                          rate down.
 //   Fallback            -- fixed 60 BPM, a common resting-heartrate pace.
@@ -621,29 +622,28 @@ const RGBf MODE_INDICATOR_COLOR[NUM_MODES] = { {0, 0, 0}, {0, 0, 255}, {255, 255
 Mode currentMode = MODE_DEFAULT; // shared by both strips
 
 // Fixed-rate synthetic-clock modes' target BPM, indexed by Mode.
-// MODE_DEFAULT's entry is unused (its rate is dynamic -- see
-// updateDefaultBpmTarget()/currentSyntheticBpm()); MODE_REGULAR's entry is
+// MODE_DEFAULT's entry is unused (its rate is per-participant and dynamic
+// -- see updateDefaultParticipant()/defaultBpm[]); MODE_REGULAR's entry is
 // also unused (real sensor bpm drives it, not a synthetic clock at all).
 const uint16_t SYNTHETIC_BPM[NUM_MODES] = { 0, 6, 60, 0 };
 
 // Default mode's BPM arc: hold at DEFAULT_BPM_START for DEFAULT_HOLD_MS
-// (matching Breath Entrainment's rate for that first stretch), then ease
-// toward DEFAULT_BPM_TARGET -- an exponential approach (same smoothing
-// idiom as POT_SMOOTHING/SPO2_SMOOTHING, ticked once per
-// DEFAULT_EASE_UPDATE_MS instead of every loop() so the rate is tunable
-// in human terms), not an instant jump or a fixed-duration linear ramp.
-// DEFAULT_BPM_EASE_RATE=0.01 per 1s tick gives a ~100s time constant --
-// most of the way to 60 BPM after a few minutes, deliberately gradual
-// ("softly"), not a snap. Reset on every fresh entry into MODE_DEFAULT --
-// see cycleMode()/setup().
+// (matching Breath Entrainment's rate for that first stretch), then each
+// participant's own bpm nudges 1-2 BPM closer to DEFAULT_BPM_TARGET on
+// every one of *their own* beats (see updateDefaultParticipant()) -- a
+// per-beat step, not a wall-clock timer, so the nudges naturally land
+// more often as the rate climbs (each beat interval shrinks a little,
+// which happens a little sooner next time). Unlike the fixed-rate
+// synthetic modes, the two participants are NOT kept in lockstep here --
+// each eases on its own schedule from its own beats, so they can drift
+// apart before both eventually reach DEFAULT_BPM_TARGET. Reset on every
+// fresh entry into MODE_DEFAULT -- see cycleMode()/setup().
 const unsigned long DEFAULT_HOLD_MS = 60000UL;
 const float DEFAULT_BPM_START = 6.0f;
 const float DEFAULT_BPM_TARGET = 60.0f;
-const float DEFAULT_BPM_EASE_RATE = 0.01f;
-const unsigned long DEFAULT_EASE_UPDATE_MS = 1000;
-float defaultBpmTarget = DEFAULT_BPM_START;
-unsigned long defaultModeEnteredAt = 0;
-unsigned long defaultLastEaseUpdate = 0;
+unsigned long defaultModeEnteredAt = 0;     // shared: both participants hold until the same deadline
+float defaultBpm[2] = { DEFAULT_BPM_START, DEFAULT_BPM_START };       // [0]=participant1, [1]=participant2
+unsigned long defaultNextBeat[2] = { 0, 0 };
 
 // Pattern 0 (Red-Blue): per-pixel hue within each strip's own theme range.
 const uint8_t SPARKLE_BEAT_COUNT = 14;
@@ -1585,51 +1585,61 @@ void cycleMode()
     participant2.pulseTriggerTime = 0;
     if (currentMode == MODE_DEFAULT)
     {
-        defaultBpmTarget = DEFAULT_BPM_START;
         defaultModeEnteredAt = millis();
-        defaultLastEaseUpdate = 0;
+        defaultBpm[0] = defaultBpm[1] = DEFAULT_BPM_START;
+        defaultNextBeat[0] = defaultNextBeat[1] = 0;
     }
     Serial.print(F("Mode: "));
     Serial.println(modeNames[currentMode]);
 }
 
-// Advances Default mode's BPM arc: holds at DEFAULT_BPM_START until
-// DEFAULT_HOLD_MS has elapsed since entering the mode, then eases
-// defaultBpmTarget toward DEFAULT_BPM_TARGET -- see the "Default mode's
-// BPM arc" comment above defaultBpmTarget's declaration. Call once per
-// loop() iteration while currentMode == MODE_DEFAULT.
-void updateDefaultBpmTarget()
+// Advances one participant's Default-mode clock independently: fires that
+// participant's pulse when its own next-beat time is reached, then --
+// once DEFAULT_HOLD_MS has passed since entering the mode -- nudges that
+// participant's own bpm a random 1-2 BPM closer to DEFAULT_BPM_TARGET
+// (clamped so it never overshoots) before scheduling the next beat off
+// the new, slightly faster rate. `idx` (0 or 1) selects that participant's
+// slot in defaultBpm[]/defaultNextBeat[] -- see their declaration for why
+// the two participants aren't kept in lockstep here. Call once per
+// participant per loop() iteration while currentMode == MODE_DEFAULT.
+void updateDefaultParticipant(HeartChannel &channel, uint8_t idx)
 {
-    if (millis() - defaultModeEnteredAt < DEFAULT_HOLD_MS)
+    unsigned long now = millis();
+    if (defaultNextBeat[idx] != 0 && now < defaultNextBeat[idx])
         return;
 
-    if (millis() - defaultLastEaseUpdate < DEFAULT_EASE_UPDATE_MS)
-        return;
-    defaultLastEaseUpdate = millis();
+    channel.pulseTriggerTime = now;
 
-    defaultBpmTarget += (DEFAULT_BPM_TARGET - defaultBpmTarget) * DEFAULT_BPM_EASE_RATE;
+    if (now - defaultModeEnteredAt >= DEFAULT_HOLD_MS && defaultBpm[idx] < DEFAULT_BPM_TARGET)
+    {
+        float step = (float)random(1, 3); // 1 or 2 BPM, per the spec
+        defaultBpm[idx] = min(DEFAULT_BPM_TARGET, defaultBpm[idx] + step);
+    }
+
+    defaultNextBeat[idx] = now + 60000UL / (unsigned long)defaultBpm[idx];
 }
 
-// The BPM any synthetic-clock mode is currently running at -- Default's
-// is dynamic (defaultBpmTarget, see updateDefaultBpmTarget()), the rest
-// are fixed (SYNTHETIC_BPM). Only meaningful when currentMode != MODE_REGULAR.
+// The BPM a fixed-rate synthetic-clock mode (Breath Entrainment/Fallback)
+// is currently running at. Default isn't covered here -- it has its own
+// per-participant state (defaultBpm[]) via updateDefaultParticipant()
+// instead of a single shared rate. Only meaningful when
+// currentMode is one of those two fixed-rate modes.
 uint16_t currentSyntheticBpm()
 {
-    if (currentMode == MODE_DEFAULT)
-        return (uint16_t)(defaultBpmTarget + 0.5f);
     return SYNTHETIC_BPM[currentMode];
 }
 
-// Synthetic-clock modes (everything except MODE_REGULAR): a
+// Fixed-rate synthetic-clock modes (Breath Entrainment, Fallback): a
 // sensor-independent heartbeat shared by both participants, driving the
 // exact same pulseTriggerTime-based motor envelope and LED beat reaction
 // real beats use (HeartChannel::motorIntensity()/LedState::checkBeat())
 // -- so the felt/visual pulse looks and feels identical either way, just
 // decoupled from any real physiological signal. Both channels fire in
-// perfect unison (same `now` written to both). Call once per loop()
-// iteration with currentSyntheticBpm(); loop() skips real sensor reads
-// entirely while any synthetic-clock mode is active, so this is the only
-// thing setting pulseTriggerTime during that time.
+// perfect unison (same `now` written to both) -- unlike Default, which
+// uses updateDefaultParticipant() per participant instead. Call once per
+// loop() iteration with currentSyntheticBpm(); loop() skips real sensor
+// reads entirely while any synthetic-clock mode is active, so this is the
+// only thing setting pulseTriggerTime for these two modes.
 void updateSyntheticClock(uint16_t bpm)
 {
     unsigned long now = millis();
@@ -1765,12 +1775,18 @@ void loop()
     if (syntheticMode)
     {
         // Default / Breath Entrainment / Fallback: no real sensor I/O at
-        // all, per spec -- a synthetic clock at this mode's own rate
-        // (Default's is dynamic, see updateDefaultBpmTarget()) drives
-        // both channels' shared pulseTriggerTime instead.
+        // all, per spec. Default schedules each participant's pulse (and
+        // BPM nudge) independently; the other two share one clock at a
+        // fixed rate, both participants firing in unison.
         if (currentMode == MODE_DEFAULT)
-            updateDefaultBpmTarget();
-        updateSyntheticClock(currentSyntheticBpm());
+        {
+            updateDefaultParticipant(participant1, 0);
+            updateDefaultParticipant(participant2, 1);
+        }
+        else
+        {
+            updateSyntheticClock(currentSyntheticBpm());
+        }
     }
     else
     {
@@ -1806,11 +1822,16 @@ void loop()
 
     // In a synthetic-clock mode, participant.bpm/.state are frozen
     // (process() isn't running) -- feed the LED/pattern code that mode's
-    // current rate and force "has signal" on instead, so beat-reactive
-    // patterns render normally off the artificial pulse rather than
-    // reading a stale real value.
-    uint16_t bpm1 = syntheticMode ? currentSyntheticBpm() : participant1.bpm;
-    uint16_t bpm2 = syntheticMode ? currentSyntheticBpm() : participant2.bpm;
+    // current rate (Default: each participant's own defaultBpm[]; the
+    // fixed-rate modes: the same value for both) and force "has signal"
+    // on instead, so beat-reactive patterns render normally off the
+    // artificial pulse rather than reading a stale real value.
+    uint16_t bpm1 = !syntheticMode ? participant1.bpm
+                   : (currentMode == MODE_DEFAULT) ? (uint16_t)(defaultBpm[0] + 0.5f)
+                   : currentSyntheticBpm();
+    uint16_t bpm2 = !syntheticMode ? participant2.bpm
+                   : (currentMode == MODE_DEFAULT) ? (uint16_t)(defaultBpm[1] + 0.5f)
+                   : currentSyntheticBpm();
     bool active1 = syntheticMode ? true : (participant1.state == TRACKING);
     bool active2 = syntheticMode ? true : (participant2.state == TRACKING);
 
